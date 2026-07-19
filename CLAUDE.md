@@ -74,7 +74,7 @@ Two-step HTTP login + WebSocket + SKOOT handshake:
 1. **GET** `https://login.eternalcitygame.com/login.php` — receives `biscuit=test` cookie
 2. **POST** same URL with `submit=true&phrase=&uname=<user>&pwd=<password>` + biscuit cookie — receives 302 with `user`/`pass` cookies (pass is a numeric token, NOT the raw password)
 3. **WebSocket** connects to `ws://game.eternalcitygame.com:8080/tec` with user/pass cookies
-4. Client sends: `SKOTOS Praetor 0.1.0`
+4. Client sends the official Orchil identity/version: `SKOTOS Orchil 0.2.3`
 5. Server sends: `SECRET <token>`
 6. Client sends: `USER <username>`, `SECRET <token>`, `HASH <md5(username + passCookie + token)>`
 7. Credentials stored in system keyring (multi-account via JSON blob)

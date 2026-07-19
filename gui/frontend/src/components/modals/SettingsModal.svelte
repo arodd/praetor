@@ -28,8 +28,8 @@
       await api.setEchoScript(echoScript);
       await api.setColorWords(colorWords);
       await api.setHideIPs(hideIPs);
-      await api.setSessionLogging(sessionLogging);
       await api.setLogPath(logPath);
+      await api.setSessionLogging(sessionLogging);
       await api.setMinimapScale(minimapScale);
       await api.setCompassScale(compassScale);
       await api.setOutputFontSize(fontSize);
@@ -49,10 +49,10 @@
         store.config.Logging.Session.Path = logPath;
       }
       store.addToast("Settings", "Saved");
+      store.openModal = null;
     } catch (e) {
       store.addToast("Save failed", String(e));
     }
-    store.openModal = null;
   }
 </script>
 
@@ -89,7 +89,7 @@
       </select>
     </div>
     <div class="field">
-      <span>Log path (blank = default)</span>
+      <span>{api.inWeb() ? "Log path on server host (blank = default)" : "Log path (blank = default)"}</span>
       <input type="text" bind:value={logPath} />
     </div>
   </div>

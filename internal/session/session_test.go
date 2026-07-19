@@ -40,7 +40,7 @@ func TestSession_ConnectAndReceiveLines(t *testing.T) {
 			t.Logf("read ident error: %v", err)
 			return
 		}
-		if string(msg) != "SKOTOS Praetor 0.1.0\r\n" {
+		if string(msg) != "SKOTOS Orchil 0.2.3\r\n" {
 			t.Errorf("expected ident message, got %q", string(msg))
 		}
 

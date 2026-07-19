@@ -11,6 +11,10 @@ import (
 )
 
 const (
+	// clientIntroduction matches the identity and version announced by the
+	// official TEC HTML5 client (Orchil).
+	clientIntroduction = "SKOTOS Orchil 0.2.3"
+
 	// Detection window tuned against the live TEC server, which answers every
 	// WebSocket ping with a pong (~77ms RTT), so a live connection always yields
 	// an incoming frame within one ping period. A 30s read deadline (3x the ping
@@ -45,8 +49,8 @@ func New() *Session {
 }
 
 // Connect establishes a WebSocket connection to the given URL with optional
-// cookies for authentication. After connecting, it sends the TecClient
-// identification string and starts the read loop.
+// cookies for authentication. After connecting, it sends the official
+// Orchil-compatible identification string and starts the read loop.
 func (s *Session) Connect(url string, cookies []*http.Cookie) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -72,7 +76,7 @@ func (s *Session) Connect(url string, cookies []*http.Cookie) error {
 	s.conn = conn
 
 	// Send client identification
-	err = conn.WriteMessage(websocket.TextMessage, []byte("SKOTOS Praetor 0.1.0\r\n"))
+	err = conn.WriteMessage(websocket.TextMessage, []byte(clientIntroduction+"\r\n"))
 	if err != nil {
 		conn.Close()
 		s.conn = nil
