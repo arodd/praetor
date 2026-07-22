@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -24,6 +25,8 @@ type GuiApp struct {
 	emitter Emitter
 
 	mu               sync.Mutex
+	configMu         sync.RWMutex
+	savedConfig      *config.Config
 	started          bool
 	kudosPromptShown bool
 
@@ -61,6 +64,7 @@ func NewGuiApp(deps *Deps, emitter Emitter) *GuiApp {
 		deps:              deps,
 		render:            r,
 		emitter:           emitter,
+		savedConfig:       cloneConfig(deps.Config),
 		initialKudosQueue: len(deps.Config.Kudos.Queue),
 	}
 	a.colorWords.Store(deps.Config.UI.ColorWords)
@@ -260,6 +264,9 @@ type InitState struct {
 func (a *GuiApp) GetInitState() InitState {
 	accountState := a.ListAccounts()
 	modes := a.client().Engine.ModeNames()
+	a.configMu.RLock()
+	configSnapshot := cloneConfig(a.cfg())
+	a.configMu.RUnlock()
 	return InitState{
 		Version:         a.deps.Version,
 		Debug:           a.deps.Debug,
@@ -267,12 +274,31 @@ func (a *GuiApp) GetInitState() InitState {
 		CredentialStore: accountState.CredentialStore,
 		HasModes:        len(modes) > 0,
 		ModeNames:       modes,
-		Config:          a.cfg(),
+		Config:          configSnapshot,
 	}
 }
 
-// GetConfig returns the current configuration.
-func (a *GuiApp) GetConfig() *config.Config { return a.cfg() }
+// GetConfig returns an immutable deep snapshot of the current configuration.
+func (a *GuiApp) GetConfig() *config.Config {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	return cloneConfig(a.cfg())
+}
+
+func cloneConfig(source *config.Config) *config.Config {
+	if source == nil {
+		return nil
+	}
+	data, err := json.Marshal(source)
+	if err != nil {
+		return &config.Config{}
+	}
+	var cloned config.Config
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return &config.Config{}
+	}
+	return &cloned
+}
 
 // ---------------------------------------------------------------------------
 // Authentication & connection
