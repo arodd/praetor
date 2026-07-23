@@ -109,6 +109,7 @@ export const setColorWords = (v: boolean) => call<void>("SetColorWords", undefin
 export const setHideIPs = (v: boolean) => call<void>("SetHideIPs", undefined, v);
 export const setInputSpellcheck = (v: boolean) => call<void>("SetInputSpellcheck", undefined, v);
 export const setUpdateCheck = (v: boolean) => call<void>("SetUpdateCheck", undefined, v);
+export const setRetainAppLogs = (v: boolean) => call<void>("SetRetainAppLogs", undefined, v);
 export const setSessionLogging = (v: boolean) => call<void>("SetSessionLogging", undefined, v);
 export const setLogPath = (p: string) => call<void>("SetLogPath", undefined, p);
 export const setDisplayMode = (m: string) => call<void>("SetDisplayMode", undefined, m);
