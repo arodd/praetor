@@ -11,6 +11,13 @@ import (
 	"github.com/cyber-godzilla/praetor/internal/config"
 )
 
+// Account activation can legitimately outlive the web server's ordinary
+// 30-second write limit: it performs the game's HTTP login round-trips and
+// opens the game socket, either of which may crawl on a slow upstream. Only
+// the two connection requests need the longer deadline — every other endpoint
+// keeps the ordinary limit.
+const connectionResponseWriteTimeout = 3 * time.Minute
+
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, _ string) {
 	var req struct {
 		Username string `json:"username"`
@@ -21,6 +28,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, _ string)
 		s.writeError(w, http.StatusBadRequest, "invalid_request", "Username and password are required.")
 		return
 	}
+	s.extendConnectionResponseDeadline(w)
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if s.conn != "disconnected" {
@@ -54,6 +62,7 @@ func (s *Server) handleConnectStored(w http.ResponseWriter, r *http.Request, _ s
 		s.writeError(w, http.StatusBadRequest, "invalid_request", "An account name is required.")
 		return
 	}
+	s.extendConnectionResponseDeadline(w)
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if s.conn != "disconnected" {
@@ -69,6 +78,18 @@ func (s *Server) handleConnectStored(w http.ResponseWriter, r *http.Request, _ s
 	}
 	s.conn = "connected"
 	s.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) extendConnectionResponseDeadline(w http.ResponseWriter) {
+	err := http.NewResponseController(w).SetWriteDeadline(
+		time.Now().Add(connectionResponseWriteTimeout),
+	)
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		s.log.Printf(
+			"web connection response deadline extension failed: %v",
+			err,
+		)
+	}
 }
 
 func (s *Server) handleDisconnect(w http.ResponseWriter, _ *http.Request, _ string) {

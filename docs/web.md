@@ -314,6 +314,11 @@ credentials.
   invalidates them and returns pre-restart tabs to the web-password screen.
   The shared TEC connection also ends with the process; it is not reconstructed
   from browser state.
+- The two game-connection endpoints have a dedicated three-minute response
+  deadline so a slow account activation can exceed the ordinary 30-second
+  web-request limit without turning into a proxy 500. When a separate reverse
+  proxy defines its own response-header timeout, set that timeout to at least
+  three minutes as well.
 - A settings change, script reload, mode switch, credential-store mutation, Kudos update,
   persistent-data clear, or command affects the shared process.
 - Input drafts, command history, active tab, scroll position, unread markers,

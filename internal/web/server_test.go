@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/cyber-godzilla/praetor/internal/client"
 	"github.com/cyber-godzilla/praetor/internal/config"
@@ -24,9 +25,14 @@ import (
 
 func newTestServer(t *testing.T) (*Server, http.Handler) {
 	t.Helper()
+	srv, handler, _ := newTestServerWithCredentials(t, &session.MockCredentialStore{})
+	return srv, handler
+}
+
+func newTestServerWithCredentials(t *testing.T, creds session.CredentialStore) (*Server, http.Handler, *client.Client) {
+	t.Helper()
 	dir := t.TempDir()
 	cfg := config.Defaults()
-	creds := &session.MockCredentialStore{}
 	gameClient, err := client.NewClient(cfg, []string{dir}, dir, creds)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +58,124 @@ func newTestServer(t *testing.T) (*Server, http.Handler) {
 		"assets/app.js": &fstest.MapFile{Data: []byte("console.log('praetor')")},
 	}
 	srv := NewServer(app, auth, hub, fs.FS(assets), log.New(io.Discard, "", 0))
-	return srv, srv.Handler()
+	return srv, srv.Handler(), gameClient
+}
+
+type writeDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadline time.Time
+}
+
+func (r *writeDeadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	r.deadline = deadline
+	return nil
+}
+
+func TestGameConnectRoutesOutliveSlowActivation(t *testing.T) {
+	server, handler := newTestServer(t)
+	cookie, csrf := loginRequest(t, handler)
+	server.opMu.Lock()
+	server.conn = "connecting"
+	server.opMu.Unlock()
+
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "new account",
+			path: "/api/v1/game/connect",
+			body: `{"username":"alice","password":"secret"}`,
+		},
+		{
+			name: "stored account",
+			path: "/api/v1/game/connect-stored",
+			body: `{"username":"alice"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			startedAt := time.Now()
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"http://praetor.test"+test.path,
+				strings.NewReader(test.body),
+			)
+			request.Host = "praetor.test"
+			request.Header.Set("Origin", "http://praetor.test")
+			request.Header.Set("X-Praetor-CSRF", csrf)
+			request.Header.Set("Content-Type", "application/json")
+			request.AddCookie(cookie)
+			response := &writeDeadlineRecorder{
+				ResponseRecorder: httptest.NewRecorder(),
+			}
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusConflict {
+				t.Fatalf(
+					"status=%d body=%s",
+					response.Code, response.Body.String(),
+				)
+			}
+			minimum := startedAt.Add(
+				connectionResponseWriteTimeout - time.Second,
+			)
+			maximum := time.Now().Add(
+				connectionResponseWriteTimeout + time.Second,
+			)
+			if response.deadline.Before(minimum) ||
+				response.deadline.After(maximum) {
+				t.Fatalf(
+					"connection deadline=%s, want approximately %s",
+					response.deadline.Sub(startedAt),
+					connectionResponseWriteTimeout,
+				)
+			}
+		})
+	}
+}
+
+func TestCredentialStoreStatusIsNotCollapsedIntoAnEmptyAccountList(t *testing.T) {
+	storeErr := fmt.Errorf("secret service unavailable")
+	_, handler, _ := newTestServerWithCredentials(
+		t,
+		&session.MockCredentialStore{Err: storeErr},
+	)
+	cookie, csrf := loginRequest(t, handler)
+
+	accountsReq := httptest.NewRequest(http.MethodGet, "http://praetor.test/api/v1/accounts", nil)
+	accountsReq.Host = "praetor.test"
+	accountsReq.AddCookie(cookie)
+	accountsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(accountsResponse, accountsReq)
+	if accountsResponse.Code != http.StatusOK {
+		t.Fatalf("accounts status=%d body=%s", accountsResponse.Code, accountsResponse.Body.String())
+	}
+	var state appgui.AccountState
+	if err := json.Unmarshal(accountsResponse.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.CredentialStore.Available || !state.CredentialStore.CanStore || state.CredentialStore.Message == "" {
+		t.Fatalf("credential status = %+v", state.CredentialStore)
+	}
+
+	saveReq := httptest.NewRequest(
+		http.MethodPut,
+		"http://praetor.test/api/v1/accounts/alice",
+		bytes.NewBufferString(`{"password":"password"}`),
+	)
+	saveReq.Host = "praetor.test"
+	saveReq.Header.Set("Origin", "http://praetor.test")
+	saveReq.Header.Set("X-Praetor-CSRF", csrf)
+	saveReq.Header.Set("Content-Type", "application/json")
+	saveReq.AddCookie(cookie)
+	saveResponse := httptest.NewRecorder()
+	handler.ServeHTTP(saveResponse, saveReq)
+	if saveResponse.Code != http.StatusServiceUnavailable || !strings.Contains(saveResponse.Body.String(), "credential_store_unavailable") {
+		t.Fatalf("save status=%d body=%s", saveResponse.Code, saveResponse.Body.String())
+	}
 }
 
 func TestProtectedRoutesRejectUnauthenticatedRequests(t *testing.T) {
@@ -334,6 +457,31 @@ func TestServerRevisionedSettingBroadcast(t *testing.T) {
 	}
 	if rr := apply(1); rr.Code != http.StatusConflict {
 		t.Fatalf("stale setting status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServerRetainAppLogsSetting(t *testing.T) {
+	srv, handler := newTestServer(t)
+	cookie, csrf := loginRequest(t, handler)
+	body := bytes.NewBufferString(`{"expectedRevision":1,"value":true}`)
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"http://praetor.test/api/v1/settings/retain-app-logs",
+		body,
+	)
+	req.Host = "praetor.test"
+	req.Header.Set("Origin", "http://praetor.test")
+	req.Header.Set("X-Praetor-CSRF", csrf)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("setting status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !srv.app.GetConfig().Logging.App.Retain {
+		t.Fatal("retain-app-logs did not update the shared configuration")
 	}
 }
 
