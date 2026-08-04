@@ -5,19 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sync"
+	"time"
 
 	appgui "github.com/cyber-godzilla/praetor/internal/gui"
 )
-
-const (
-	subscriberQueueSize = 64
-	maxSubscribers      = 64
-)
-
-type Subscription struct {
-	ID       uint64
-	Messages <-chan Envelope
-}
 
 // Hub is both the GuiApp emitter and the fan-out point for authenticated web
 // subscribers. Projection mutation, sequence allocation, snapshot capture, and
@@ -29,7 +20,8 @@ type Hub struct {
 	sequence        uint64
 	nextID          uint64
 	projector       *Projection
-	clients         map[uint64]chan Envelope
+	clients         map[uint64]*eventSubscriber
+	stream          eventStreamCounters
 	closed          bool
 	observer        func([]appgui.WireEvent)
 	config          json.RawMessage
@@ -48,7 +40,7 @@ func NewHub(historyLimit int) *Hub {
 	return &Hub{
 		serverID:       hex.EncodeToString(b),
 		projector:      NewProjection(historyLimit),
-		clients:        make(map[uint64]chan Envelope),
+		clients:        make(map[uint64]*eventSubscriber),
 		commandHistory: newCommandHistoryAuthority(),
 	}
 }
@@ -99,6 +91,16 @@ func (h *Hub) ServerID() string {
 }
 
 func (h *Hub) Subscribe() (Subscription, Envelope) {
+	return h.SubscribeWithSequenceRanges(true)
+}
+
+// SubscribeWithSequenceRanges keeps the pre-range protocol usable by a browser
+// tab that was already open across a server deployment. Legacy subscribers get
+// the same bounded backlog but receive one original sequence per envelope;
+// current clients opt into contiguous range coalescing.
+func (h *Hub) SubscribeWithSequenceRanges(
+	sequenceRanges bool,
+) (Subscription, Envelope) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed || len(h.clients) >= maxSubscribers {
@@ -106,8 +108,15 @@ func (h *Hub) Subscribe() (Subscription, Envelope) {
 	}
 	h.nextID++
 	id := h.nextID
-	ch := make(chan Envelope, subscriberQueueSize)
-	h.clients[id] = ch
+	client := &eventSubscriber{
+		id:             id,
+		createdAt:      time.Now(),
+		ready:          make(chan struct{}, 1),
+		closed:         make(chan struct{}),
+		sequenceRanges: sequenceRanges,
+	}
+	h.clients[id] = client
+	h.stream.created++
 	snapshot := Envelope{
 		Type:            "snapshot",
 		Protocol:        ProtocolVersion,
@@ -121,7 +130,13 @@ func (h *Hub) Subscribe() (Subscription, Envelope) {
 		CredentialStore: cloneCredentialStoreStatus(h.credentialStore),
 		CommandHistory:  commandHistoryUpdatePointer(h.commandHistory.snapshot()),
 	}
-	return Subscription{ID: id, Messages: ch}, snapshot
+	return Subscription{
+		ID:         id,
+		Ready:      client.ready,
+		Closed:     client.closed,
+		hub:        h,
+		subscriber: client,
+	}, snapshot
 }
 
 // LookupTypedCommand returns a previously committed browser-scoped submission
@@ -189,11 +204,14 @@ func commandHistoryUpdatePointer(
 }
 
 func (h *Hub) Unsubscribe(id uint64) {
+	h.unsubscribe(id, eventStreamCloseClientUnsubscribe)
+}
+
+func (h *Hub) unsubscribe(id uint64, reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if ch, ok := h.clients[id]; ok {
-		delete(h.clients, id)
-		close(ch)
+	if client, ok := h.clients[id]; ok {
+		h.removeSubscriberLocked(client, reason)
 	}
 }
 
@@ -220,9 +238,8 @@ func (h *Hub) Close() {
 		return
 	}
 	h.closed = true
-	for id, ch := range h.clients {
-		delete(h.clients, id)
-		close(ch)
+	for _, client := range h.clients {
+		h.removeSubscriberLocked(client, eventStreamCloseHubShutdown)
 	}
 }
 
@@ -269,12 +286,11 @@ func cloneAccounts(accounts []string) *[]string {
 }
 
 func (h *Hub) broadcastLocked(env Envelope) {
-	for id, ch := range h.clients {
-		select {
-		case ch <- env:
-		default:
-			delete(h.clients, id)
-			close(ch)
-		}
+	estimatedBytes, encoded := encodedEnvelopeSize(env)
+	if !encoded {
+		h.stream.encodingFailures++
+	}
+	for _, client := range h.clients {
+		h.enqueueLocked(client, env, estimatedBytes)
 	}
 }

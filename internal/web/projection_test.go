@@ -73,16 +73,12 @@ func TestHubEvictsSlowSubscriberWithoutBlockingOthers(t *testing.T) {
 	fast, _ := h.Subscribe()
 	defer h.Unsubscribe(fast.ID)
 
-	for i := 0; i < subscriberQueueSize+2; i++ {
+	for i := 0; i < subscriberBacklogMaxEvents+2; i++ {
 		h.Emit(appgui.EventChannel, []appgui.WireEvent{{
 			Kind: appgui.KindText,
 			Text: &appgui.TextPayload{Text: "line"},
 		}})
-		select {
-		case <-fast.Messages:
-		case <-time.After(time.Second):
-			t.Fatal("fast subscriber did not receive an event")
-		}
+		receiveSubscription(t, fast)
 	}
 
 	h.mu.Lock()
@@ -115,10 +111,18 @@ func TestHubConcurrentSubscribeAndEmitPreservesJoinBoundary(t *testing.T) {
 
 	sub, snapshot := h.Subscribe()
 	defer h.Unsubscribe(sub.ID)
-	received := make(chan uint64, emissions)
+	received := make(chan Envelope, emissions)
 	go func() {
-		for message := range sub.Messages {
-			received <- message.Sequence
+		for {
+			select {
+			case <-sub.Ready:
+				if delivery, ok := sub.next(); ok {
+					sub.recordWrite(delivery.EstimatedBytes, 0, nil)
+					received <- delivery.Envelope
+				}
+			case <-sub.Closed:
+				return
+			}
 		}
 	}()
 	wg.Wait()
@@ -126,11 +130,20 @@ func TestHubConcurrentSubscribeAndEmitPreservesJoinBoundary(t *testing.T) {
 	last := snapshot.Sequence
 	for last < emissions {
 		select {
-		case sequence := <-received:
-			if sequence != last+1 {
-				t.Fatalf("sequence after snapshot = %d, want %d", sequence, last+1)
+		case envelope := <-received:
+			if envelope.FromSequence != last+1 {
+				t.Fatalf(
+					"range after snapshot = %d-%d, want start %d",
+					envelope.FromSequence,
+					envelope.ToSequence,
+					last+1,
+				)
 			}
-			last = sequence
+			if envelope.Sequence != envelope.ToSequence ||
+				envelope.ToSequence < envelope.FromSequence {
+				t.Fatalf("invalid event range: %#v", envelope)
+			}
+			last = envelope.ToSequence
 		case <-time.After(time.Second):
 			t.Fatalf("timed out at sequence %d", last)
 		}
@@ -168,8 +181,10 @@ func TestHubCloseDuringEventDelivery(t *testing.T) {
 	h.Close()
 	h.Emit(appgui.EventChannel, []appgui.WireEvent{{Kind: appgui.KindText, Text: &appgui.TextPayload{Text: "ignored"}}})
 
-	for range subscription.Messages {
-		// The already queued envelope may be observed before the closed channel.
+	select {
+	case <-subscription.Closed:
+	case <-time.After(time.Second):
+		t.Fatal("subscription did not close with the hub")
 	}
 	if after, _ := h.Subscribe(); after.ID != 0 {
 		t.Fatalf("subscription accepted after close: %#v", after)
@@ -192,7 +207,7 @@ func TestHubSnapshotThenOrderedEvents(t *testing.T) {
 	h.Emit(appgui.EventChannel, []appgui.WireEvent{
 		{Kind: appgui.KindText, Text: &appgui.TextPayload{Text: "after"}},
 	})
-	msg := <-sub.Messages
+	msg := receiveSubscription(t, sub)
 	if msg.Type != "events" || msg.FromSequence != 2 || msg.ToSequence != 2 {
 		t.Fatalf("event envelope = %#v", msg)
 	}

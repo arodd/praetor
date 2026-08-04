@@ -92,6 +92,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.protected(true, s.handleLogout))
 	s.mux.HandleFunc("GET /api/v1/bootstrap", s.protected(false, s.handleBootstrap))
 	s.mux.HandleFunc("GET /api/v1/events", s.protected(false, s.handleEvents))
+	s.mux.HandleFunc(
+		"GET /api/v1/events/diagnostics",
+		s.protected(false, s.handleEventStreamDiagnostics),
+	)
 
 	s.mux.HandleFunc("POST /api/v1/game/connect", s.protected(true, s.handleConnect))
 	s.mux.HandleFunc("POST /api/v1/game/connect-stored", s.protected(true, s.handleConnectStored))
@@ -238,80 +242,254 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, _ string) 
 	}
 	defer conn.Close()
 
-	sub, snapshot := s.hub.Subscribe()
+	sequenceRanges := r.URL.Query().Get("sequence_ranges") == "1"
+	sub, snapshot := s.hub.SubscribeWithSequenceRanges(sequenceRanges)
 	if sub.ID == 0 {
-		_ = conn.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "browser capacity reached"),
-			time.Now().Add(5*time.Second))
+		s.closeEventWebSocket(
+			conn,
+			0,
+			websocket.CloseTryAgainLater,
+			"browser capacity reached",
+			"browser_capacity_reached",
+		)
 		return
 	}
-	defer s.hub.Unsubscribe(sub.ID)
+	s.log.Printf(
+		"web_event_stream event=subscription_created subscriber_id=%d sequence_ranges=%t active_subscribers=%d",
+		sub.ID,
+		sequenceRanges,
+		s.hub.Diagnostics().ActiveSubscribers,
+	)
+	terminationReason := "handler_exit"
+	defer func() {
+		s.hub.unsubscribe(sub.ID, terminationReason)
+		diagnostic := sub.diagnostics()
+		s.log.Printf(
+			"web_event_stream event=subscription_removed subscriber_id=%d reason=%s received_envelopes=%d received_events=%d delivered_messages=%d delivered_events=%d coalesced_envelopes=%d high_water_envelopes=%d high_water_events=%d high_water_bytes=%d write_count=%d write_errors=%d max_write_ms=%d",
+			sub.ID,
+			diagnostic.CloseReason,
+			diagnostic.ReceivedEnvelopes,
+			diagnostic.ReceivedEvents,
+			diagnostic.DeliveredMessages,
+			diagnostic.DeliveredEvents,
+			diagnostic.CoalescedEnvelopes,
+			diagnostic.HighWaterEnvelopes,
+			diagnostic.HighWaterEvents,
+			diagnostic.HighWaterBytes,
+			diagnostic.WriteCount,
+			diagnostic.WriteErrors,
+			diagnostic.MaxWriteMilliseconds,
+		)
+	}()
 
 	conn.SetReadLimit(1024)
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	})
-	done := make(chan struct{})
+	readDone := make(chan error, 1)
 	go func() {
-		defer close(done)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
+				readDone <- err
 				return
 			}
 		}
 	}()
 
 	if _, err := s.auth.Session(r); err != nil {
-		_ = conn.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "authentication expired"),
-			time.Now().Add(5*time.Second))
+		terminationReason = "authentication_expired"
+		s.closeEventWebSocket(
+			conn,
+			sub.ID,
+			websocket.ClosePolicyViolation,
+			"authentication expired",
+			terminationReason,
+		)
 		return
 	}
-	if err := writeWebSocketJSON(conn, snapshot); err != nil {
+	snapshotBytes, snapshotDuration, err := writeWebSocketJSON(conn, snapshot)
+	sub.recordWrite(snapshotBytes, snapshotDuration, err)
+	if err != nil {
+		terminationReason = "snapshot_write_error"
+		s.log.Printf(
+			"web_event_stream event=websocket_write_error subscriber_id=%d envelope_type=snapshot bytes=%d duration_ms=%d reason=%s",
+			sub.ID,
+			snapshotBytes,
+			snapshotDuration.Milliseconds(),
+			terminationReason,
+		)
 		return
 	}
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case msg, ok := <-sub.Messages:
+		case <-sub.Ready:
+			delivery, ok := sub.next()
 			if !ok {
-				_ = conn.WriteControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "resync required"),
-					time.Now().Add(5*time.Second))
-				return
+				continue
 			}
 			// Logout revokes the browser session immediately for subsequent
 			// application data; do not wait for the next heartbeat to notice.
 			if _, err := s.auth.Session(r); err != nil {
-				_ = conn.WriteControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "authentication expired"),
-					time.Now().Add(5*time.Second))
+				terminationReason = "authentication_expired"
+				s.closeEventWebSocket(
+					conn,
+					sub.ID,
+					websocket.ClosePolicyViolation,
+					"authentication expired",
+					terminationReason,
+				)
 				return
 			}
-			if err := writeWebSocketJSON(conn, msg); err != nil {
+			writtenBytes, writeDuration, writeErr := writeWebSocketJSON(
+				conn,
+				delivery.Envelope,
+			)
+			sub.recordWrite(writtenBytes, writeDuration, writeErr)
+			if delivery.SourceEnvelopes > 1 ||
+				writeDuration >= eventStreamSlowWriteDiagnostic {
+				s.log.Printf(
+					"web_event_stream event=websocket_write subscriber_id=%d envelope_type=%s from_sequence=%d to_sequence=%d source_envelopes=%d contained_events=%d bytes=%d duration_ms=%d queued_envelopes=%d queued_events=%d queued_bytes=%d",
+					sub.ID,
+					delivery.Envelope.Type,
+					delivery.Envelope.FromSequence,
+					delivery.Envelope.ToSequence,
+					delivery.SourceEnvelopes,
+					delivery.EventCount,
+					writtenBytes,
+					writeDuration.Milliseconds(),
+					delivery.QueuedEnvelopesAfter,
+					delivery.QueuedEventsAfter,
+					delivery.QueuedBytesAfter,
+				)
+			}
+			if writeErr != nil {
+				terminationReason = "event_write_error"
+				s.log.Printf(
+					"web_event_stream event=websocket_write_error subscriber_id=%d envelope_type=%s bytes=%d duration_ms=%d reason=%s",
+					sub.ID,
+					delivery.Envelope.Type,
+					writtenBytes,
+					writeDuration.Milliseconds(),
+					terminationReason,
+				)
 				return
 			}
+		case <-sub.Closed:
+			terminationReason = sub.closeReason()
+			switch terminationReason {
+			case eventStreamCloseSubscriberHardLimit:
+				s.closeEventWebSocket(
+					conn,
+					sub.ID,
+					websocket.CloseTryAgainLater,
+					"resync required",
+					terminationReason,
+				)
+			case eventStreamCloseHubShutdown:
+				s.closeEventWebSocket(
+					conn,
+					sub.ID,
+					websocket.CloseGoingAway,
+					"server shutting down",
+					terminationReason,
+				)
+			}
+			return
 		case <-ticker.C:
 			if _, err := s.auth.Session(r); err != nil {
-				_ = conn.WriteControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "authentication expired"),
-					time.Now().Add(5*time.Second))
+				terminationReason = "authentication_expired"
+				s.closeEventWebSocket(
+					conn,
+					sub.ID,
+					websocket.ClosePolicyViolation,
+					"authentication expired",
+					terminationReason,
+				)
 				return
 			}
 			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+				terminationReason = "heartbeat_write_error"
 				return
 			}
-		case <-done:
+		case readErr := <-readDone:
+			code, reason := classifyWebSocketReadClose(readErr)
+			terminationReason = reason
+			s.log.Printf(
+				"web_event_stream event=websocket_closed subscriber_id=%d peer_close_code=%d reason=%s",
+				sub.ID,
+				code,
+				reason,
+			)
 			return
 		}
 	}
 }
 
-func writeWebSocketJSON(conn *websocket.Conn, value any) error {
+func writeWebSocketJSON(conn *websocket.Conn, value any) (int, time.Duration, error) {
+	started := time.Now()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return 0, time.Since(started), err
+	}
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return conn.WriteJSON(value)
+	err = conn.WriteMessage(websocket.TextMessage, encoded)
+	return len(encoded), time.Since(started), err
+}
+
+func (s *Server) closeEventWebSocket(
+	conn *websocket.Conn,
+	subscriberID uint64,
+	code int,
+	publicReason string,
+	machineReason string,
+) {
+	s.log.Printf(
+		"web_event_stream event=websocket_close_sent subscriber_id=%d close_code=%d reason=%s",
+		subscriberID,
+		code,
+		machineReason,
+	)
+	_ = conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, publicReason),
+		time.Now().Add(5*time.Second),
+	)
+}
+
+func classifyWebSocketReadClose(err error) (int, string) {
+	var closeError *websocket.CloseError
+	if !errors.As(err, &closeError) {
+		return websocket.CloseAbnormalClosure, "network_read_error"
+	}
+	switch closeError.Code {
+	case websocket.CloseNormalClosure:
+		return closeError.Code, "browser_normal_close"
+	case websocket.CloseProtocolError:
+		return closeError.Code, "browser_protocol_close"
+	case websocket.CloseInternalServerErr:
+		return closeError.Code, "browser_application_close"
+	case websocket.CloseGoingAway, websocket.CloseAbnormalClosure:
+		return closeError.Code, "network_close"
+	case 4002:
+		return closeError.Code, "browser_protocol_validation_failure"
+	case 4003:
+		return closeError.Code, "browser_event_handler_failure"
+	case 4004:
+		return closeError.Code, "browser_backlog_hard_limit"
+	default:
+		return closeError.Code, "browser_close"
+	}
+}
+
+func (s *Server) handleEventStreamDiagnostics(
+	w http.ResponseWriter,
+	_ *http.Request,
+	_ string,
+) {
+	s.writeJSON(w, http.StatusOK, s.hub.Diagnostics())
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {

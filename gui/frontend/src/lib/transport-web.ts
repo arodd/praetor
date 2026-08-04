@@ -1,3 +1,4 @@
+import { tick } from "svelte";
 import type {
   AppConfig,
   AccountState,
@@ -33,6 +34,117 @@ interface WebEnvelope {
   credentialStore?: CredentialStoreStatus;
   result?: { operation: string; ok: boolean; message?: string };
   commandHistory?: CommandHistoryUpdate;
+}
+
+export type WebEventStreamFailureCategory =
+  | "json_parse_failure"
+  | "protocol_validation_failure"
+  | "sequence_gap"
+  | "event_handler_failure"
+  | "server_resynchronization"
+  | "client_backlog_limit"
+  | "network_close";
+
+export interface WebEventStreamClientDiagnostics {
+  parsedMessages: number;
+  parsedBytes: number;
+  maxParseMilliseconds: number;
+  appliedEnvelopes: number;
+  appliedEvents: number;
+  maxApplicationMilliseconds: number;
+  reconciliationSamples: number;
+  maxReconciliationMilliseconds: number;
+  outputPaneRenderSamples: number;
+  maxOutputPaneRenderMilliseconds: number;
+  mainThreadYields: number;
+  maxYieldMilliseconds: number;
+  reconnects: number;
+  failures: Record<WebEventStreamFailureCategory, number>;
+  lastFailure?: {
+    category: WebEventStreamFailureCategory;
+    message: string;
+  };
+  lastClose?: {
+    code: number;
+    reason: string;
+    category: WebEventStreamFailureCategory;
+  };
+}
+
+interface QueuedWebEnvelope {
+  socket: WebSocket;
+  epoch: number;
+  envelope: WebEnvelope;
+  encodedBytes: number;
+  eventCount: number;
+}
+
+class WebEnvelopeValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebEnvelopeValidationError";
+  }
+}
+
+class WebSequenceGapError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebSequenceGapError";
+  }
+}
+
+class WebEventHandlerError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "WebEventHandlerError";
+  }
+}
+
+class StaleWebEventStreamError extends Error {
+  constructor() {
+    super("Superseded Praetor event stream");
+    this.name = "StaleWebEventStreamError";
+  }
+}
+
+const WEB_EVENT_APPLY_CHUNK_SIZE = 100;
+const WEB_INBOUND_MAX_EVENTS = 8192;
+const WEB_INBOUND_MAX_BYTES = 16 << 20;
+const UTF8_ENCODER = new TextEncoder();
+
+function newEventStreamDiagnostics(): WebEventStreamClientDiagnostics {
+  return {
+    parsedMessages: 0,
+    parsedBytes: 0,
+    maxParseMilliseconds: 0,
+    appliedEnvelopes: 0,
+    appliedEvents: 0,
+    maxApplicationMilliseconds: 0,
+    reconciliationSamples: 0,
+    maxReconciliationMilliseconds: 0,
+    outputPaneRenderSamples: 0,
+    maxOutputPaneRenderMilliseconds: 0,
+    mainThreadYields: 0,
+    maxYieldMilliseconds: 0,
+    reconnects: 0,
+    failures: {
+      json_parse_failure: 0,
+      protocol_validation_failure: 0,
+      sequence_gap: 0,
+      event_handler_failure: 0,
+      server_resynchronization: 0,
+      client_backlog_limit: 0,
+      network_close: 0,
+    },
+  };
+}
+
+function monotonicNow(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function envelopeEventCount(message: WebEnvelope): number {
+  return Array.isArray(message?.events) ? message.events.length : 0;
 }
 
 interface ErrorResponse {
@@ -82,6 +194,16 @@ export class WebTransport implements PraetorTransport {
   private authExpired = false;
   private readonly sessionSource = randomSessionMarker();
   private sessionChannel: BroadcastChannel | null = null;
+  private streamEpoch = 0;
+  private inboundQueue: QueuedWebEnvelope[] = [];
+  private inboundQueuedEvents = 0;
+  private inboundQueuedBytes = 0;
+  private inboundProcessing = false;
+  private localClose: {
+    epoch: number;
+    category: WebEventStreamFailureCategory;
+  } | null = null;
+  private streamDiagnostics = newEventStreamDiagnostics();
 
   constructor() {
     if (
@@ -101,6 +223,19 @@ export class WebTransport implements PraetorTransport {
         this.sessionChannel = null;
       }
     }
+  }
+
+  eventStreamDiagnostics(): WebEventStreamClientDiagnostics {
+    return {
+      ...this.streamDiagnostics,
+      failures: { ...this.streamDiagnostics.failures },
+      lastFailure: this.streamDiagnostics.lastFailure
+        ? { ...this.streamDiagnostics.lastFailure }
+        : undefined,
+      lastClose: this.streamDiagnostics.lastClose
+        ? { ...this.streamDiagnostics.lastClose }
+        : undefined,
+    };
   }
 
   async invoke<T>(method: string, fallback: T, ...args: any[]): Promise<T> {
@@ -359,65 +494,446 @@ export class WebTransport implements PraetorTransport {
   private openSocket() {
     if (!this.started || this.socket || !this.csrf) return;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${location.host}/api/v1/events`);
+    const socket = new WebSocket(
+      `${scheme}//${location.host}/api/v1/events?sequence_ranges=1`,
+    );
+    const epoch = ++this.streamEpoch;
     this.socket = socket;
     socket.onopen = () => {
       this.reconnectAttempt = 0;
     };
-    socket.onmessage = (event) => {
-      try {
-        this.handleEnvelope(JSON.parse(event.data) as WebEnvelope);
-      } catch (error) {
-        console.error("Invalid Praetor event envelope:", error);
-        socket.close(1002, "invalid event envelope");
-      }
-    };
-    socket.onclose = () => {
-      // A deliberate session refresh can replace the socket before the old
-      // close event arrives. That retired socket must not mark its replacement
-      // disconnected or schedule an extra reconnect.
-      if (this.socket !== socket) return;
-      this.socket = null;
-      this.socketReady = false;
-      if (this.started) {
-        this.emitSystem({ type: "transport", transportState: "reconnecting" });
-        this.scheduleReconnect();
-      }
-    };
+    socket.onmessage = (event) => this.receiveSocketData(socket, epoch, event.data);
+    socket.onclose = (event) => this.handleSocketClose(
+      socket,
+      epoch,
+      event.code,
+      event.reason,
+    );
     socket.onerror = () => socket.close();
   }
 
-  private handleEnvelope(message: WebEnvelope) {
-    if (message.protocol !== 1) throw new Error(`Unsupported protocol ${message.protocol}`);
+  private receiveSocketData(socket: WebSocket, epoch: number, data: unknown) {
+    const started = monotonicNow();
+    const encodedBytes = typeof data === "string"
+      ? UTF8_ENCODER.encode(data).byteLength
+      : 0;
+    let message: WebEnvelope;
+    try {
+      if (typeof data !== "string") {
+        throw new Error("Praetor event message was not UTF-8 JSON text");
+      }
+      message = JSON.parse(data) as WebEnvelope;
+    } catch (error) {
+      const duration = monotonicNow() - started;
+      this.recordParse(encodedBytes, duration);
+      this.failEventSocket(
+        socket,
+        epoch,
+        "json_parse_failure",
+        error instanceof Error ? error.message : String(error),
+        4002,
+        "invalid event json",
+      );
+      return;
+    }
+    this.recordParse(encodedBytes, monotonicNow() - started);
+    this.enqueueInbound({
+      socket,
+      epoch,
+      envelope: message,
+      encodedBytes,
+      eventCount: envelopeEventCount(message),
+    });
+  }
+
+  private handleSocketClose(
+    socket: WebSocket,
+    epoch: number,
+    code: number,
+    reason: string,
+  ) {
+    if (epoch !== this.streamEpoch) return;
+    if (this.socket === socket) this.socket = null;
+    this.removeQueuedEpoch(epoch);
+    this.socketReady = false;
+    if (!this.started) return;
+
+    let category: WebEventStreamFailureCategory;
+    if (this.localClose?.epoch === epoch) {
+      category = this.localClose.category;
+      this.localClose = null;
+    } else if (code === 1013 && reason === "resync required") {
+      category = "server_resynchronization";
+      this.recordStreamFailure(category, "Server requested snapshot resynchronization");
+    } else {
+      category = "network_close";
+      this.recordStreamFailure(category, "Praetor browser event connection closed");
+    }
+    this.streamDiagnostics.lastClose = {
+      code,
+      reason: this.safeDiagnosticMessage(reason || "no close reason"),
+      category,
+    };
+    console.warn("Praetor event stream closed", {
+      category,
+      code,
+      reason: this.streamDiagnostics.lastClose.reason,
+    });
+    this.streamDiagnostics.reconnects++;
+    this.emitSystem({ type: "transport", transportState: "reconnecting" });
+    this.scheduleReconnect();
+  }
+
+  private recordParse(bytes: number, duration: number) {
+    this.streamDiagnostics.parsedMessages++;
+    this.streamDiagnostics.parsedBytes += bytes;
+    this.streamDiagnostics.maxParseMilliseconds = Math.max(
+      this.streamDiagnostics.maxParseMilliseconds,
+      duration,
+    );
+  }
+
+  private safeDiagnosticMessage(message: string): string {
+    return message.replace(/[\r\n\0]+/g, " ").slice(0, 240);
+  }
+
+  private recordStreamFailure(
+    category: WebEventStreamFailureCategory,
+    message: string,
+  ) {
+    const safeMessage = this.safeDiagnosticMessage(message);
+    this.streamDiagnostics.failures[category]++;
+    this.streamDiagnostics.lastFailure = { category, message: safeMessage };
+    console.error("Praetor event stream failure", {
+      category,
+      message: safeMessage,
+    });
+  }
+
+  private failEventSocket(
+    socket: WebSocket,
+    epoch: number,
+    category: WebEventStreamFailureCategory,
+    message: string,
+    closeCode: number,
+    closeReason: string,
+  ) {
+    if (epoch !== this.streamEpoch || this.localClose?.epoch === epoch) return;
+    this.localClose = { epoch, category };
+    this.recordStreamFailure(category, message);
+    this.removeQueuedEpoch(epoch);
+    socket.close(closeCode, closeReason);
+  }
+
+  private enqueueInbound(item: QueuedWebEnvelope) {
+    if (item.epoch !== this.streamEpoch || this.socket !== item.socket) return;
+    const boundedLiveWork = item.envelope.type !== "snapshot";
+    if (boundedLiveWork && (
+      this.inboundQueuedEvents + item.eventCount > WEB_INBOUND_MAX_EVENTS ||
+      this.inboundQueuedBytes + item.encodedBytes > WEB_INBOUND_MAX_BYTES
+    )) {
+      this.failEventSocket(
+        item.socket,
+        item.epoch,
+        "client_backlog_limit",
+        "Browser event application backlog exceeded its hard bound",
+        4004,
+        "client backlog limit",
+      );
+      return;
+    }
+    this.inboundQueue.push(item);
+    // A reconnect snapshot is the recovery mechanism for a server-side hard
+    // eviction and can legitimately contain the configured retained
+    // scrollback. It is still serialized and UI-chunked, but it must not consume
+    // the live-work budget or the first live envelope arriving behind it could
+    // force an endless reconnect loop. Only post-snapshot live work is bounded.
+    if (boundedLiveWork) {
+      this.inboundQueuedEvents += item.eventCount;
+      this.inboundQueuedBytes += item.encodedBytes;
+    }
+    void this.drainInboundQueue();
+  }
+
+  private clearInboundQueue() {
+    this.inboundQueue = [];
+    this.inboundQueuedEvents = 0;
+    this.inboundQueuedBytes = 0;
+  }
+
+  private removeQueuedEpoch(epoch: number) {
+    if (this.inboundQueue.length === 0) return;
+    this.inboundQueue = this.inboundQueue.filter((item) => {
+      if (item.epoch !== epoch) return true;
+      if (item.envelope.type !== "snapshot") {
+        this.inboundQueuedEvents -= item.eventCount;
+        this.inboundQueuedBytes -= item.encodedBytes;
+      }
+      return false;
+    });
+    this.inboundQueuedEvents = Math.max(0, this.inboundQueuedEvents);
+    this.inboundQueuedBytes = Math.max(0, this.inboundQueuedBytes);
+  }
+
+  private releaseInbound(item: QueuedWebEnvelope) {
+    if (item.envelope.type === "snapshot") return;
+    this.inboundQueuedEvents = Math.max(
+      0,
+      this.inboundQueuedEvents - item.eventCount,
+    );
+    this.inboundQueuedBytes = Math.max(
+      0,
+      this.inboundQueuedBytes - item.encodedBytes,
+    );
+  }
+
+  private async drainInboundQueue() {
+    if (this.inboundProcessing) return;
+    this.inboundProcessing = true;
+    try {
+      while (this.inboundQueue.length > 0) {
+        const item = this.inboundQueue.shift()!;
+        let stop = false;
+        try {
+          if (item.epoch !== this.streamEpoch || this.socket !== item.socket) continue;
+          await this.handleEnvelope(item.envelope, item.epoch);
+        } catch (error) {
+          if (error instanceof StaleWebEventStreamError) continue;
+          let category: WebEventStreamFailureCategory = "protocol_validation_failure";
+          let closeCode = 4002;
+          let closeReason = "invalid event envelope";
+          if (error instanceof WebSequenceGapError) {
+            category = "sequence_gap";
+            closeReason = "event sequence gap";
+          } else if (error instanceof WebEventHandlerError) {
+            category = "event_handler_failure";
+            closeCode = 4003;
+            closeReason = "event handler failure";
+          }
+          this.failEventSocket(
+            item.socket,
+            item.epoch,
+            category,
+            error instanceof Error ? error.message : String(error),
+            closeCode,
+            closeReason,
+          );
+          stop = true;
+        } finally {
+          this.releaseInbound(item);
+        }
+        if (stop) return;
+      }
+    } finally {
+      this.inboundProcessing = false;
+      // An onmessage callback can append after the loop's final length check but
+      // before the flag is lowered. Re-check once so that work cannot strand.
+      if (this.inboundQueue.length > 0) void this.drainInboundQueue();
+    }
+  }
+
+  private ensureCurrentEpoch(epoch?: number) {
+    if (epoch !== undefined && epoch !== this.streamEpoch) {
+      throw new StaleWebEventStreamError();
+    }
+  }
+
+  private validateProtocol(message: WebEnvelope) {
+    if (!message || typeof message !== "object") {
+      throw new WebEnvelopeValidationError("Praetor event envelope is not an object");
+    }
+    if (message.protocol !== 1) {
+      throw new WebEnvelopeValidationError(`Unsupported protocol ${message.protocol}`);
+    }
+    if (![
+      "snapshot",
+      "events",
+      "config",
+      "modes",
+      "accounts",
+      "operation",
+      "commandHistory",
+    ].includes(message.type)) {
+      throw new WebEnvelopeValidationError(`Unsupported envelope type ${String(message.type)}`);
+    }
+    if (typeof message.serverId !== "string" || message.serverId === "") {
+      throw new WebEnvelopeValidationError("Praetor event envelope has no server identity");
+    }
+    if (message.events !== undefined && !Array.isArray(message.events)) {
+      throw new WebEnvelopeValidationError("Praetor event payload is not an array");
+    }
+  }
+
+  private sequenceRange(message: WebEnvelope): { from: number; to: number } {
+    const legacy = message.sequence;
+    const from = message.fromSequence ?? legacy;
+    const to = message.toSequence ?? legacy;
+    if (
+      !Number.isSafeInteger(from) ||
+      !Number.isSafeInteger(to) ||
+      (from ?? 0) <= 0 ||
+      (to ?? 0) < (from ?? 0)
+    ) {
+      throw new WebEnvelopeValidationError("Praetor event sequence range is invalid");
+    }
+    if (legacy !== undefined && legacy !== to) {
+      throw new WebEnvelopeValidationError("Praetor event sequence does not match range end");
+    }
+    if (message.type !== "events" && from !== to) {
+      throw new WebEnvelopeValidationError("Authoritative state envelope cannot span a sequence range");
+    }
+    if (message.serverId !== this.serverId) {
+      throw new WebSequenceGapError("Praetor server identity changed; resynchronizing");
+    }
+    if (from !== this.sequence + 1) {
+      throw new WebSequenceGapError(
+        `Praetor event sequence gap after ${this.sequence}; received ${from}-${to}`,
+      );
+    }
+    return { from: from!, to: to! };
+  }
+
+  private invokeEventHandler(callback: () => void) {
+    try {
+      callback();
+    } catch (error) {
+      throw new WebEventHandlerError(error);
+    }
+  }
+
+  private async yieldMainThread(epoch?: number) {
+    const started = monotonicNow();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const duration = monotonicNow() - started;
+    this.streamDiagnostics.mainThreadYields++;
+    this.streamDiagnostics.maxYieldMilliseconds = Math.max(
+      this.streamDiagnostics.maxYieldMilliseconds,
+      duration,
+    );
+    this.ensureCurrentEpoch(epoch);
+  }
+
+  private scheduleRenderMeasurement(appliedAt: number, epoch?: number) {
+    // Handler return measures state mutation, not the Svelte flush or output
+    // layout that follows it. Observe those asynchronously so diagnostics cover
+    // the complete browser path without adding a frame delay to delivery.
+    void tick().then(() => {
+      if (epoch !== undefined && epoch !== this.streamEpoch) return;
+      const reconciledAt = monotonicNow();
+      this.streamDiagnostics.reconciliationSamples++;
+      this.streamDiagnostics.maxReconciliationMilliseconds = Math.max(
+        this.streamDiagnostics.maxReconciliationMilliseconds,
+        reconciledAt - appliedAt,
+      );
+      if (
+        typeof requestAnimationFrame !== "function" ||
+        typeof document === "undefined"
+      ) return;
+      requestAnimationFrame(() => {
+        if (epoch !== undefined && epoch !== this.streamEpoch) return;
+        const content = document.querySelector<HTMLElement>(".output .content");
+        if (!content) return;
+        // Reading scrollHeight makes any pending output-pane layout part of the
+        // observed latency; no text or DOM content enters the diagnostics.
+        void content.scrollHeight;
+        this.streamDiagnostics.outputPaneRenderSamples++;
+        this.streamDiagnostics.maxOutputPaneRenderMilliseconds = Math.max(
+          this.streamDiagnostics.maxOutputPaneRenderMilliseconds,
+          monotonicNow() - appliedAt,
+        );
+      });
+    });
+  }
+
+  private async applyEventChunks(
+    events: WireEvent[],
+    snapshot: boolean,
+    epoch?: number,
+  ) {
+    if (events.length === 0) {
+      this.invokeEventHandler(() => {
+        for (const handler of [...this.handlers]) {
+          if (snapshot) handler.snapshot?.([]);
+          else handler.events([]);
+        }
+      });
+      return;
+    }
+    for (let offset = 0; offset < events.length; offset += WEB_EVENT_APPLY_CHUNK_SIZE) {
+      this.ensureCurrentEpoch(epoch);
+      const chunk = events.slice(offset, offset + WEB_EVENT_APPLY_CHUNK_SIZE);
+      this.invokeEventHandler(() => {
+        for (const handler of [...this.handlers]) {
+          if (snapshot && offset === 0) {
+            handler.snapshot?.(chunk);
+          } else if (!snapshot || handler.snapshot) {
+            handler.events(chunk);
+          }
+        }
+      });
+      this.scheduleRenderMeasurement(monotonicNow(), epoch);
+      if (offset + chunk.length < events.length) {
+        await this.yieldMainThread(epoch);
+      }
+    }
+  }
+
+  private async handleEnvelope(message: WebEnvelope, epoch?: number) {
+    const started = monotonicNow();
+    this.ensureCurrentEpoch(epoch);
+    this.validateProtocol(message);
     if (message.type === "snapshot") {
-      this.serverId = message.serverId;
-      this.sequence = message.sequence ?? 0;
+      const snapshotSequence = message.sequence ?? 0;
+      if (!Number.isSafeInteger(snapshotSequence) || snapshotSequence < 0) {
+        throw new WebEnvelopeValidationError("Praetor snapshot sequence is invalid");
+      }
       if (message.config) {
         this.revision = message.revision ?? this.revision;
-        this.emitSystem({ type: "config", config: message.config, revision: this.revision });
+        this.invokeEventHandler(() => this.emitSystem({
+          type: "config",
+          config: message.config,
+          revision: this.revision,
+        }));
       }
-      if (message.modeNames) this.emitSystem({ type: "modes", modeNames: message.modeNames });
+      if (message.modeNames) {
+        this.invokeEventHandler(() => this.emitSystem({
+          type: "modes",
+          modeNames: message.modeNames,
+        }));
+      }
       if (message.accounts || message.credentialStore) {
-        this.emitSystem({
+        this.invokeEventHandler(() => this.emitSystem({
           type: "accounts",
           accounts: message.accounts ?? [],
           credentialStore: message.credentialStore,
-        });
+        }));
       }
-      for (const handler of this.handlers) handler.snapshot?.(message.events ?? []);
+      await this.applyEventChunks(message.events ?? [], true, epoch);
       if (message.commandHistory) {
-        this.emitSystem({ type: "command-history", commandHistory: message.commandHistory });
+        this.invokeEventHandler(() => this.emitSystem({
+          type: "command-history",
+          commandHistory: message.commandHistory,
+        }));
       }
+      this.ensureCurrentEpoch(epoch);
+      this.serverId = message.serverId;
+      this.sequence = snapshotSequence;
       this.socketReady = true;
-      this.emitSystem({ type: "transport", transportState: "connected" });
+      this.invokeEventHandler(() => this.emitSystem({
+        type: "transport",
+        transportState: "connected",
+      }));
+      this.streamDiagnostics.appliedEnvelopes++;
+      this.streamDiagnostics.appliedEvents += message.events?.length ?? 0;
+      this.streamDiagnostics.maxApplicationMilliseconds = Math.max(
+        this.streamDiagnostics.maxApplicationMilliseconds,
+        monotonicNow() - started,
+      );
       return;
     }
-    if (message.serverId !== this.serverId || (message.sequence ?? 0) !== this.sequence + 1) {
-      throw new Error("Praetor event sequence gap; resynchronizing");
-    }
-    this.sequence = message.sequence ?? this.sequence;
+    const range = this.sequenceRange(message);
     if (message.type === "events") {
-      for (const handler of this.handlers) handler.events(message.events ?? []);
+      await this.applyEventChunks(message.events ?? [], false, epoch);
     } else if (message.type === "config" && message.config) {
       const revision = message.revision ?? this.revision;
       // A mutation response can reach its initiating browser before an older
@@ -425,21 +941,43 @@ export class WebTransport implements PraetorTransport {
       // browser's authoritative config revision backward.
       if (revision >= this.revision) {
         this.revision = revision;
-        this.emitSystem({ type: "config", config: message.config, revision });
+        this.invokeEventHandler(() => this.emitSystem({
+          type: "config",
+          config: message.config,
+          revision,
+        }));
       }
     } else if (message.type === "modes") {
-      this.emitSystem({ type: "modes", modeNames: message.modeNames ?? [], result: message.result });
+      this.invokeEventHandler(() => this.emitSystem({
+        type: "modes",
+        modeNames: message.modeNames ?? [],
+        result: message.result,
+      }));
     } else if (message.type === "accounts") {
-      this.emitSystem({
+      this.invokeEventHandler(() => this.emitSystem({
         type: "accounts",
         accounts: message.accounts ?? [],
         credentialStore: message.credentialStore,
-      });
+      }));
     } else if (message.type === "operation") {
-      this.emitSystem({ type: "operation", result: message.result });
+      this.invokeEventHandler(() => this.emitSystem({
+        type: "operation",
+        result: message.result,
+      }));
     } else if (message.type === "commandHistory" && message.commandHistory) {
-      this.emitSystem({ type: "command-history", commandHistory: message.commandHistory });
+      this.invokeEventHandler(() => this.emitSystem({
+        type: "command-history",
+        commandHistory: message.commandHistory,
+      }));
     }
+    this.ensureCurrentEpoch(epoch);
+    this.sequence = range.to;
+    this.streamDiagnostics.appliedEnvelopes++;
+    this.streamDiagnostics.appliedEvents += message.events?.length ?? 0;
+    this.streamDiagnostics.maxApplicationMilliseconds = Math.max(
+      this.streamDiagnostics.maxApplicationMilliseconds,
+      monotonicNow() - started,
+    );
   }
 
   private emitSystem(update: SystemUpdate) {
@@ -608,6 +1146,11 @@ export class WebTransport implements PraetorTransport {
     const socket = this.socket;
     this.socket = null;
     this.socketReady = false;
+    // Retire the outgoing socket's epoch so its queued envelopes and late
+    // close event cannot touch the replacement stream.
+    this.streamEpoch++;
+    this.clearInboundQueue();
+    this.localClose = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     socket?.close(1000, reason);
@@ -619,6 +1162,9 @@ export class WebTransport implements PraetorTransport {
 
   private expireAuthentication(reason: string) {
     this.started = false;
+    this.streamEpoch++;
+    this.clearInboundQueue();
+    this.localClose = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.socket?.close(1000, reason);

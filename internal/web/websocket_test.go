@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +39,104 @@ func TestEventWebSocketRequiresAuthenticationAndSameOrigin(t *testing.T) {
 	}
 	if response == nil || response.StatusCode != http.StatusForbidden {
 		t.Fatalf("wrong-origin websocket response = %#v, err=%v", response, err)
+	}
+}
+
+func TestProductionShapedBurstStaysConnectedAndOrderedForTwoWebSockets(
+	t *testing.T,
+) {
+	srv, handler := newTestServer(t)
+	cookieA, _ := loginRequest(t, handler)
+	cookieB, _ := loginRequest(t, handler)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") +
+		"/api/v1/events?sequence_ranges=1"
+	dial := func(cookie *http.Cookie) *websocket.Conn {
+		connection, response, err := websocket.DefaultDialer.Dial(
+			wsURL,
+			http.Header{
+				"Origin": []string{httpServer.URL},
+				"Cookie": []string{cookie.String()},
+			},
+		)
+		if err != nil {
+			t.Fatalf("websocket dial response=%#v: %v", response, err)
+		}
+		_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var snapshot Envelope
+		if err := connection.ReadJSON(&snapshot); err != nil {
+			t.Fatalf("read initial snapshot: %v", err)
+		}
+		if snapshot.Type != "snapshot" || snapshot.Sequence != 0 {
+			t.Fatalf("initial snapshot = %#v", snapshot)
+		}
+		return connection
+	}
+	first := dial(cookieA)
+	defer first.Close()
+	second := dial(cookieB)
+	defer second.Close()
+
+	const count = 500
+	for index := 0; index < count; index++ {
+		srv.hub.Emit(appgui.EventChannel, []appgui.WireEvent{
+			inventoryEvent(index, 128),
+		})
+	}
+
+	readBurst := func(name string, connection *websocket.Conn) []string {
+		t.Helper()
+		sequence := uint64(0)
+		lines := make([]string, 0, count)
+		for sequence < count {
+			var envelope Envelope
+			if err := connection.ReadJSON(&envelope); err != nil {
+				t.Fatalf("%s read at sequence %d: %v", name, sequence, err)
+			}
+			if envelope.Type != "events" ||
+				envelope.FromSequence != sequence+1 ||
+				envelope.ToSequence < envelope.FromSequence ||
+				envelope.Sequence != envelope.ToSequence {
+				t.Fatalf("%s non-contiguous envelope: %#v", name, envelope)
+			}
+			for _, event := range envelope.Events {
+				if event.Text == nil {
+					t.Fatalf("%s non-text inventory event: %#v", name, event)
+				}
+				lines = append(lines, event.Text.Text)
+			}
+			sequence = envelope.ToSequence
+		}
+		return lines
+	}
+	firstLines := readBurst("first", first)
+	secondLines := readBurst("second", second)
+	if len(firstLines) != count || len(secondLines) != count {
+		t.Fatalf(
+			"burst sizes first=%d second=%d want=%d",
+			len(firstLines),
+			len(secondLines),
+			count,
+		)
+	}
+	for index := 0; index < count; index++ {
+		prefix := fmt.Sprintf("inventory line %04d", index)
+		if !strings.HasPrefix(firstLines[index], prefix) ||
+			firstLines[index] != secondLines[index] {
+			t.Fatalf(
+				"browser streams diverged at %d: first=%q second=%q",
+				index,
+				firstLines[index],
+				secondLines[index],
+			)
+		}
+	}
+	diagnostics := srv.hub.Diagnostics()
+	if diagnostics.ActiveSubscribers != 2 ||
+		diagnostics.HardLimitEvictions != 0 ||
+		diagnostics.Writes < 2 {
+		t.Fatalf("post-burst diagnostics = %+v", diagnostics)
 	}
 }
 

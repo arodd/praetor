@@ -43,7 +43,7 @@ describe("web transport operation parity", () => {
     });
   });
 
-  it("installs a snapshot before ordered live events and rejects a gap", () => {
+  it("installs a snapshot before ordered live events and rejects a gap", async () => {
     const transport = new WebTransport();
     const received: string[] = [];
     transport.subscribe({
@@ -61,22 +61,430 @@ describe("web transport operation parity", () => {
       events: [{ kind: Kind.Text, text: { text, segments: [{ text }] } }],
     });
 
-    (transport as any).handleEnvelope({
+    await (transport as any).handleEnvelope({
       type: "snapshot",
       protocol: 1,
       serverId: "server-a",
       sequence: 4,
       events: [{ kind: Kind.Text, text: { text: "before", segments: [{ text: "before" }] } }],
     });
-    (transport as any).handleEnvelope(envelope(5, "after"));
+    await (transport as any).handleEnvelope(envelope(5, "after"));
 
     expect(received).toEqual(["snapshot:before", "transport:connected", "events:after"]);
-    expect(() => (transport as any).handleEnvelope(envelope(7, "gap"))).toThrow(
+    await expect((transport as any).handleEnvelope(envelope(7, "gap"))).rejects.toThrow(
       "sequence gap",
     );
   });
 
-  it("does not roll config backward when an older broadcast follows a mutation response", () => {
+  it("applies a contiguous coalesced range in bounded ordered UI chunks", async () => {
+    const transport = new WebTransport();
+    const received: number[] = [];
+    const chunkSizes: number[] = [];
+    let sequenceDuringApplication = -1;
+    transport.subscribe({
+      snapshot: () => {},
+      events: (events) => {
+        sequenceDuringApplication = (transport as any).sequence;
+        chunkSizes.push(events.length);
+        received.push(...events.map((event) => Number(event.text?.text)));
+      },
+    });
+    await (transport as any).handleEnvelope({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 10,
+      events: [],
+    });
+    const events = Array.from({ length: 250 }, (_, index) => ({
+      kind: Kind.Text,
+      text: { text: String(index), segments: [{ text: String(index) }] },
+    }));
+
+    await (transport as any).handleEnvelope({
+      type: "events",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 13,
+      fromSequence: 11,
+      toSequence: 13,
+      events,
+    });
+
+    expect(chunkSizes).toEqual([100, 100, 50]);
+    expect(received).toEqual(Array.from({ length: 250 }, (_, index) => index));
+    expect(sequenceDuringApplication).toBe(10);
+    expect((transport as any).sequence).toBe(13);
+    expect(transport.eventStreamDiagnostics()).toMatchObject({
+      appliedEnvelopes: 2,
+      appliedEvents: 250,
+      mainThreadYields: 2,
+    });
+  });
+
+  it("measures reconciliation and output-pane layout after applied chunks", async () => {
+    vi.stubGlobal("document", {
+      querySelector: vi.fn(() => ({ scrollHeight: 4096 })),
+    });
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      queueMicrotask(() => callback(performance.now()));
+      return 1;
+    });
+    const transport = new WebTransport();
+    transport.subscribe({
+      snapshot: () => {},
+      events: () => {},
+    });
+
+    await (transport as any).handleEnvelope({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 0,
+      events: [],
+    });
+    await (transport as any).handleEnvelope({
+      type: "events",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 1,
+      fromSequence: 1,
+      toSequence: 1,
+      events: [{
+        kind: Kind.Text,
+        text: { text: "inventory", segments: [{ text: "inventory" }] },
+      }],
+    });
+
+    await vi.waitFor(() => {
+      expect(transport.eventStreamDiagnostics()).toMatchObject({
+        reconciliationSamples: 1,
+        outputPaneRenderSamples: 1,
+      });
+    });
+    const diagnostics = transport.eventStreamDiagnostics();
+    expect(diagnostics.maxReconciliationMilliseconds).toBeGreaterThanOrEqual(0);
+    expect(diagnostics.maxOutputPaneRenderMilliseconds).toBeGreaterThanOrEqual(0);
+  });
+
+  it("keeps sequence unchanged when event application fails", async () => {
+    const transport = new WebTransport();
+    transport.subscribe({
+      snapshot: () => {},
+      events: () => { throw new Error("renderer exploded"); },
+    });
+    await (transport as any).handleEnvelope({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 4,
+      events: [],
+    });
+
+    await expect((transport as any).handleEnvelope({
+      type: "events",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 5,
+      fromSequence: 5,
+      toSequence: 5,
+      events: [{ kind: Kind.Text, text: { text: "line", segments: [{ text: "line" }] } }],
+    })).rejects.toMatchObject({ name: "WebEventHandlerError" });
+    expect((transport as any).sequence).toBe(4);
+  });
+
+  it("serializes socket messages while a large range yields to the UI", async () => {
+    const transport = new WebTransport();
+    const order: string[] = [];
+    const closes: Array<[number, string]> = [];
+    const socket = {
+      close: (code: number, reason: string) => closes.push([code, reason]),
+    } as unknown as WebSocket;
+    (transport as any).streamEpoch = 1;
+    (transport as any).socket = socket;
+    transport.subscribe({
+      snapshot: () => order.push("snapshot"),
+      events: (events) => order.push(`events:${events[0]?.text?.text}`),
+      system: (update) => {
+        if (update.type === "modes") order.push("modes");
+      },
+    });
+    const send = (envelope: object) => (transport as any).receiveSocketData(
+      socket,
+      1,
+      JSON.stringify(envelope),
+    );
+    send({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 0,
+      events: [],
+    });
+    send({
+      type: "events",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 1,
+      fromSequence: 1,
+      toSequence: 1,
+      events: Array.from({ length: 250 }, (_, index) => ({
+        kind: Kind.Text,
+        text: { text: String(index), segments: [{ text: String(index) }] },
+      })),
+    });
+    send({
+      type: "modes",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 2,
+      modeNames: ["idle"],
+    });
+
+    await vi.waitFor(() => expect((transport as any).sequence).toBe(2));
+    expect(closes).toEqual([]);
+    expect(order).toEqual([
+      "snapshot",
+      "events:0",
+      "events:100",
+      "events:200",
+      "modes",
+    ]);
+  });
+
+  it("reports handler failures separately from malformed JSON", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handlerTransport = new WebTransport();
+    const handlerCloses: Array<[number, string]> = [];
+    const handlerSocket = {
+      close: (code: number, reason: string) => handlerCloses.push([code, reason]),
+    } as unknown as WebSocket;
+    (handlerTransport as any).streamEpoch = 1;
+    (handlerTransport as any).socket = handlerSocket;
+    handlerTransport.subscribe({
+      events: () => {},
+      snapshot: () => { throw new Error("output renderer failure"); },
+    });
+    (handlerTransport as any).receiveSocketData(
+      handlerSocket,
+      1,
+      JSON.stringify({
+        type: "snapshot",
+        protocol: 1,
+        serverId: "server-a",
+        sequence: 0,
+        events: [],
+      }),
+    );
+    await vi.waitFor(() => expect(handlerCloses).toEqual([[4003, "event handler failure"]]));
+    expect(handlerTransport.eventStreamDiagnostics().lastFailure?.category).toBe(
+      "event_handler_failure",
+    );
+    expect(handlerTransport.eventStreamDiagnostics().failures.json_parse_failure).toBe(0);
+
+    const parseTransport = new WebTransport();
+    const parseCloses: Array<[number, string]> = [];
+    const parseSocket = {
+      close: (code: number, reason: string) => parseCloses.push([code, reason]),
+    } as unknown as WebSocket;
+    (parseTransport as any).streamEpoch = 1;
+    (parseTransport as any).socket = parseSocket;
+    (parseTransport as any).receiveSocketData(parseSocket, 1, "{not json");
+    expect(parseCloses).toEqual([[4002, "invalid event json"]]);
+    expect(parseTransport.eventStreamDiagnostics().lastFailure?.category).toBe(
+      "json_parse_failure",
+    );
+    expect(parseTransport.eventStreamDiagnostics().failures.event_handler_failure).toBe(0);
+    errorSpy.mockRestore();
+  });
+
+  it("records server resynchronization and network closes with code and reason", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const serverTransport = new WebTransport();
+    const socket = { close: () => {} } as unknown as WebSocket;
+    (serverTransport as any).started = true;
+    (serverTransport as any).streamEpoch = 3;
+    (serverTransport as any).socket = socket;
+    (serverTransport as any).scheduleReconnect = vi.fn();
+    (serverTransport as any).handleSocketClose(
+      socket,
+      3,
+      1013,
+      "resync required",
+    );
+    expect(serverTransport.eventStreamDiagnostics().lastClose).toEqual({
+      code: 1013,
+      reason: "resync required",
+      category: "server_resynchronization",
+    });
+
+    const networkTransport = new WebTransport();
+    (networkTransport as any).started = true;
+    (networkTransport as any).streamEpoch = 7;
+    (networkTransport as any).socket = socket;
+    (networkTransport as any).scheduleReconnect = vi.fn();
+    (networkTransport as any).handleSocketClose(socket, 7, 1006, "");
+    expect(networkTransport.eventStreamDiagnostics().lastClose).toEqual({
+      code: 1006,
+      reason: "no close reason",
+      category: "network_close",
+    });
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("bounds parsed browser work while preserving snapshot resynchronization", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const transport = new WebTransport();
+    const closes: Array<[number, string]> = [];
+    const socket = {
+      close: (code: number, reason: string) => closes.push([code, reason]),
+    } as unknown as WebSocket;
+    (transport as any).streamEpoch = 1;
+    (transport as any).socket = socket;
+    (transport as any).receiveSocketData(
+      socket,
+      1,
+      JSON.stringify({
+        type: "events",
+        protocol: 1,
+        serverId: "server-a",
+        sequence: 1,
+        fromSequence: 1,
+        toSequence: 1,
+        events: Array.from({ length: 8193 }, (_, index) => ({
+          kind: Kind.Text,
+          text: { text: String(index), segments: [{ text: String(index) }] },
+        })),
+      }),
+    );
+    expect(closes).toEqual([[4004, "client backlog limit"]]);
+    expect(transport.eventStreamDiagnostics().lastFailure?.category).toBe(
+      "client_backlog_limit",
+    );
+    expect((transport as any).inboundQueue).toEqual([]);
+    errorSpy.mockRestore();
+  });
+
+  it("does not count a chunking reconnect snapshot against queued live work", async () => {
+    const transport = new WebTransport();
+    const closes: Array<[number, string]> = [];
+    const received: string[] = [];
+    const socket = {
+      close: (code: number, reason: string) => closes.push([code, reason]),
+    } as unknown as WebSocket;
+    (transport as any).streamEpoch = 1;
+    (transport as any).socket = socket;
+    transport.subscribe({
+      snapshot: (events) => received.push(
+        ...events.map((event) => event.text?.text ?? ""),
+      ),
+      events: (events) => received.push(
+        ...events.map((event) => event.text?.text ?? ""),
+      ),
+    });
+
+    const retained = Array.from({ length: 8193 }, (_, index) => ({
+      kind: Kind.Text,
+      text: {
+        text: `retained ${index}`,
+        segments: [{ text: `retained ${index}` }],
+      },
+    }));
+    const send = (envelope: object) => (transport as any).receiveSocketData(
+      socket,
+      1,
+      JSON.stringify(envelope),
+    );
+    send({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 12,
+      events: retained,
+    });
+    // This arrives while snapshot application is yielding. It must remain in
+    // source order without treating the retained snapshot as live backlog.
+    send({
+      type: "events",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 13,
+      fromSequence: 13,
+      toSequence: 13,
+      events: [{
+        kind: Kind.Text,
+        text: { text: "live after snapshot", segments: [{ text: "live after snapshot" }] },
+      }],
+    });
+
+    await vi.waitFor(() => expect((transport as any).sequence).toBe(13), {
+      timeout: 3000,
+    });
+    expect(closes).toEqual([]);
+    expect(received).toHaveLength(retained.length + 1);
+    expect(received[0]).toBe("retained 0");
+    expect(received[retained.length - 1]).toBe(`retained ${retained.length - 1}`);
+    expect(received[retained.length]).toBe("live after snapshot");
+    expect((transport as any).inboundQueuedEvents).toBe(0);
+    expect((transport as any).inboundQueuedBytes).toBe(0);
+  });
+
+  it.each([100, 250, 500, 1000])(
+    "applies a %i-line production-shaped burst without loss",
+    async (count) => {
+      const transport = new WebTransport();
+      let visible: string[] = [];
+      transport.subscribe({
+        snapshot: (events) => {
+          visible = events.map((event) => event.text?.text ?? "");
+        },
+        events: (events) => {
+          visible.push(...events.map((event) => event.text?.text ?? ""));
+        },
+      });
+      await (transport as any).handleEnvelope({
+        type: "snapshot",
+        protocol: 1,
+        serverId: "server-a",
+        sequence: 0,
+        events: [],
+      });
+      const events = Array.from({ length: count }, (_, index) => ({
+        kind: Kind.Text,
+        text: {
+          text: `inventory ${index}`,
+          segments: [{ text: `inventory ${index}` }],
+        },
+      }));
+      await (transport as any).handleEnvelope({
+        type: "events",
+        protocol: 1,
+        serverId: "server-a",
+        sequence: 1,
+        fromSequence: 1,
+        toSequence: 1,
+        events,
+      });
+      expect(visible).toHaveLength(count);
+      expect(visible[0]).toBe("inventory 0");
+      expect(visible[count - 1]).toBe(`inventory ${count - 1}`);
+
+      // A reconnect snapshot replaces, rather than appends to, retained output.
+      await (transport as any).handleEnvelope({
+        type: "snapshot",
+        protocol: 1,
+        serverId: "server-b",
+        sequence: 8,
+        events,
+      });
+      expect(visible).toHaveLength(count);
+      expect(new Set(visible).size).toBe(count);
+    },
+  );
+
+  it("does not roll config backward when an older broadcast follows a mutation response", async () => {
     const transport = new WebTransport();
     const revisions: number[] = [];
     transport.subscribe({
@@ -86,12 +494,12 @@ describe("web transport operation parity", () => {
       },
     });
     const config = {} as any;
-    (transport as any).handleEnvelope({
+    await (transport as any).handleEnvelope({
       type: "snapshot", protocol: 1, serverId: "server-a", sequence: 1,
       revision: 1, config,
     });
     (transport as any).acceptConfigMutation({ revision: 3, config });
-    (transport as any).handleEnvelope({
+    await (transport as any).handleEnvelope({
       type: "config", protocol: 1, serverId: "server-a", sequence: 2,
       revision: 2, config,
     });
@@ -120,7 +528,7 @@ describe("web transport operation parity", () => {
         if (update.type === "command-history") updates.push(update.commandHistory);
       },
     });
-    (transport as any).handleEnvelope({
+    await (transport as any).handleEnvelope({
       type: "snapshot",
       protocol: 1,
       serverId: "server-a",
@@ -140,7 +548,7 @@ describe("web transport operation parity", () => {
       "game",
       "browser-request-1",
     );
-    (transport as any).handleEnvelope({
+    await (transport as any).handleEnvelope({
       type: "commandHistory",
       protocol: 1,
       serverId: "server-a",
@@ -208,7 +616,7 @@ describe("web transport operation parity", () => {
     expect(result.accountState.credentialStore.available).toBe(false);
   });
 
-  it("projects credential-store health with account snapshots", () => {
+  it("projects credential-store health with account snapshots", async () => {
     const transport = new WebTransport();
     const updates: any[] = [];
     transport.subscribe({
@@ -218,7 +626,7 @@ describe("web transport operation parity", () => {
       },
     });
 
-    (transport as any).handleEnvelope({
+    await (transport as any).handleEnvelope({
       type: "snapshot",
       protocol: 1,
       serverId: "server-a",

@@ -186,6 +186,7 @@ func TestProtectedRoutesRejectUnauthenticatedRequests(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/bootstrap"},
 		{http.MethodGet, "/api/v1/events"},
+		{http.MethodGet, "/api/v1/events/diagnostics"},
 		{http.MethodPost, "/api/v1/game/connect"},
 		{http.MethodPost, "/api/v1/game/connect-stored"},
 		{http.MethodPost, "/api/v1/game/disconnect"},
@@ -212,6 +213,49 @@ func TestProtectedRoutesRejectUnauthenticatedRequests(t *testing.T) {
 				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 			}
 		})
+	}
+}
+
+func TestEventStreamDiagnosticsAreAuthenticatedBoundedMetadata(t *testing.T) {
+	server, handler := newTestServer(t)
+	cookie, _ := loginRequest(t, handler)
+	subscription, _ := server.hub.Subscribe()
+	defer server.hub.Unsubscribe(subscription.ID)
+	server.hub.Emit(appgui.EventChannel, []appgui.WireEvent{
+		inventoryEvent(1, 32),
+	})
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"http://praetor.test/api/v1/events/diagnostics",
+		nil,
+	)
+	request.Host = "praetor.test"
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("diagnostics status=%d body=%s", response.Code, response.Body.String())
+	}
+	if cache := response.Header().Get("Cache-Control"); cache != "no-store" {
+		t.Fatalf("diagnostics cache policy = %q", cache)
+	}
+	var diagnostics EventStreamDiagnostics
+	if err := json.Unmarshal(response.Body.Bytes(), &diagnostics); err != nil {
+		t.Fatalf("decode diagnostics: %v", err)
+	}
+	if diagnostics.ActiveSubscribers != 1 ||
+		diagnostics.Limits.MaxBacklogEvents != subscriberBacklogMaxEvents ||
+		diagnostics.Limits.MaxBacklogBytes != subscriberBacklogMaxBytes ||
+		len(diagnostics.Subscribers) != 1 ||
+		diagnostics.Subscribers[0].QueuedEvents != 1 {
+		t.Fatalf("diagnostics = %+v", diagnostics)
+	}
+	body := response.Body.String()
+	for _, forbidden := range []string{"inventory line", "cookie", "csrf", "password"} {
+		if strings.Contains(strings.ToLower(body), forbidden) {
+			t.Fatalf("diagnostics exposed %q: %s", forbidden, body)
+		}
 	}
 }
 
@@ -451,7 +495,7 @@ func TestServerRevisionedSettingBroadcast(t *testing.T) {
 	if rr := apply(1); rr.Code != http.StatusOK {
 		t.Fatalf("setting status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	msg := <-sub.Messages
+	msg := receiveSubscription(t, sub)
 	if msg.Type != "config" || msg.Revision != 2 {
 		t.Fatalf("broadcast = %#v", msg)
 	}
@@ -554,7 +598,7 @@ func TestServerMobileWebSettings(t *testing.T) {
 			if !test.matches(srv.app.GetConfig().UI) {
 				t.Fatalf("setting was not applied: %+v", srv.app.GetConfig().UI)
 			}
-			message := <-sub.Messages
+			message := receiveSubscription(t, sub)
 			if message.Type != "config" || message.Revision != 2 {
 				t.Fatalf("broadcast = %#v", message)
 			}

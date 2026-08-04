@@ -112,7 +112,7 @@ func TestTypedCommandHistorySynchronizesBrowsersAndLateJoinSnapshot(t *testing.T
 		t.Fatalf("first status=%d body=%s", response.Code, response.Body.String())
 	}
 	for index, subscription := range []Subscription{first, second} {
-		envelope := <-subscription.Messages
+		envelope := receiveSubscription(t, subscription)
 		if envelope.Type != "commandHistory" ||
 			envelope.CommandHistory == nil ||
 			envelope.CommandHistory.Entry == nil ||
@@ -131,8 +131,8 @@ func TestTypedCommandHistorySynchronizesBrowsersAndLateJoinSnapshot(t *testing.T
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("second browser status=%d body=%s", response.Code, response.Body.String())
 	}
-	<-first.Messages
-	<-second.Messages
+	receiveSubscription(t, first)
+	receiveSubscription(t, second)
 
 	response = submit(browserA, csrfA, "different", "history-only", "a-1")
 	if response.Code != http.StatusConflict ||
