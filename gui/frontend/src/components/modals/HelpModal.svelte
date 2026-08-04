@@ -9,12 +9,14 @@
   const fontSize = $derived(store.config?.UI?.OutputFontSize || 14);
 
   const keys: [string, string][] = [
-    ["Tab / Shift+Tab", "Next / previous tab"],
+    ["Tab / Shift+Tab", "Complete command from history / reverse match"],
     ["Alt+1…9, Alt+0", "Jump to tab N"],
     ["Alt+S", "Toggle sidebar"],
     ["Alt+M", "Quick-cycle modes"],
     ["Esc", "Open menu"],
+    ["Ctrl+R", "Search submitted command history"],
     ["↑ / ↓", "Command history"],
+    ["Home / End", "Start / end of command input"],
     ["Enter (empty)", "Send a blank line"],
   ];
 

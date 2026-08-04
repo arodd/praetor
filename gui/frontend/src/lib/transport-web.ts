@@ -2,10 +2,12 @@ import type {
   AppConfig,
   AccountState,
   ConnectResult,
+  CommandHistoryUpdate,
   CredentialStoreStatus,
   DesktopNotificationsConfig,
   InitState,
   KudosConfig,
+  TypedCommandResult,
   WireEvent,
 } from "./types";
 import type {
@@ -17,7 +19,7 @@ import type {
 import { WebAuthRequiredError } from "./transport";
 
 interface WebEnvelope {
-  type: "snapshot" | "events" | "config" | "modes" | "accounts" | "operation";
+  type: "snapshot" | "events" | "config" | "modes" | "accounts" | "operation" | "commandHistory";
   protocol: number;
   serverId: string;
   sequence?: number;
@@ -30,6 +32,7 @@ interface WebEnvelope {
   accounts?: string[];
   credentialStore?: CredentialStoreStatus;
   result?: { operation: string; ok: boolean; message?: string };
+  commandHistory?: CommandHistoryUpdate;
 }
 
 interface ErrorResponse {
@@ -136,6 +139,15 @@ export class WebTransport implements PraetorTransport {
       case "Send":
         await this.request("POST", "/api/v1/commands", { input: args[0] });
         return undefined as T;
+      case "SubmitTypedCommand": {
+        const result = await this.request<TypedCommandResult>(
+          "POST",
+          "/api/v1/typed-commands",
+          { input: args[0], disposition: args[1], submissionId: args[2] },
+        );
+        this.emitSystem({ type: "command-history", commandHistory: result.history });
+        return result as T;
+      }
       case "ModeNames": {
         const data = await this.request<{ modeNames: string[] }>("GET", "/api/v1/modes");
         return (data.modeNames ?? []) as T;
@@ -393,6 +405,9 @@ export class WebTransport implements PraetorTransport {
         });
       }
       for (const handler of this.handlers) handler.snapshot?.(message.events ?? []);
+      if (message.commandHistory) {
+        this.emitSystem({ type: "command-history", commandHistory: message.commandHistory });
+      }
       this.socketReady = true;
       this.emitSystem({ type: "transport", transportState: "connected" });
       return;
@@ -422,6 +437,8 @@ export class WebTransport implements PraetorTransport {
       });
     } else if (message.type === "operation") {
       this.emitSystem({ type: "operation", result: message.result });
+    } else if (message.type === "commandHistory" && message.commandHistory) {
+      this.emitSystem({ type: "command-history", commandHistory: message.commandHistory });
     }
   }
 
@@ -771,6 +788,7 @@ export const WEB_SUPPORTED_METHODS = new Set([
   "RemoveAccount",
   "Disconnect",
   "Send",
+  "SubmitTypedCommand",
   "ModeNames",
   "CurrentMode",
   "SetMode",

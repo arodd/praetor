@@ -25,7 +25,9 @@ describe("web responsive layout contract", () => {
     expect(app).toContain("window.visualViewport");
     expect(styles).toContain("100dvh");
     expect(styles).toMatch(/font-size:\s*16px\s*!important/);
-    expect(input).toContain('class="send"');
+    expect(input).toContain('enterkeyhint="send"');
+    expect(input).not.toContain('class="send"');
+    expect(input).toContain('class="history-search"');
     expect(input).toContain("pointer: coarse");
     expect(navigation).toMatch(/min-(?:width|height):\s*44px/);
     expect(dock).toContain("env(safe-area-inset-bottom)");
@@ -60,6 +62,41 @@ describe("web responsive layout contract", () => {
     expect(rendered).toBeGreaterThan(enabled);
     expect(focused).toBeGreaterThan(rendered);
     expect(input.slice(rendered, focused)).toContain("stickyFocusEnabled()");
+  });
+
+  it("keeps command completion and line navigation owned by the focused input", () => {
+    const game = source("../components/GameView.svelte");
+    const input = source("../components/InputLine.svelte");
+    const output = source("../components/OutputPane.svelte");
+
+    expect(game).toContain('e.code === "Tab"');
+    expect(game).toContain("commandInputOwns(e)");
+    expect(game).toContain("!e.isComposing");
+    expect(game).toContain("store.histCompleteRequest++");
+    expect(game).not.toContain("cycleTab(");
+    expect(input).toContain("historyComplete(store.histCompleteDirection)");
+    expect(input).toContain('e.key === "Home" || e.key === "End"');
+    expect(input).toContain('class="mobile-controls"');
+    expect(input).toContain('aria-label={store.histSearchActive ? "Search older command history result (Ctrl-R)"');
+    expect(input).toContain("store.histSearchRequest++");
+    expect(input).toContain('aria-label="Previous command"');
+    expect(input).toContain('aria-label="Next command or draft"');
+    expect(output).toContain("commandInputFocused");
+    expect(output).toContain('document.activeElement.matches("[data-command-input]")');
+  });
+
+  it("gives mobile command entry a full row above mode and history controls", () => {
+    const input = source("../components/InputLine.svelte");
+    const field = input.indexOf("data-command-input");
+    const mode = input.indexOf('class="mode"', field);
+    const controls = input.indexOf('class="mobile-controls"', mode);
+
+    expect(field).toBeGreaterThan(-1);
+    expect(mode).toBeGreaterThan(field);
+    expect(controls).toBeGreaterThan(mode);
+    expect(input).toContain("grid-template-columns: auto minmax(0, 1fr) auto");
+    expect(input).toContain("grid-column: 1 / -1");
+    expect(input).toContain("grid-row: 2");
   });
 
   it("wires the browser-mobile preferences together at the bottom", () => {

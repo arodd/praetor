@@ -37,6 +37,7 @@ type Hub struct {
 	modeNames       []string
 	accounts        []string
 	credentialStore appgui.CredentialStoreStatus
+	commandHistory  *commandHistoryAuthority
 }
 
 func NewHub(historyLimit int) *Hub {
@@ -45,9 +46,10 @@ func NewHub(historyLimit int) *Hub {
 		panic("web hub: crypto/rand failed: " + err.Error())
 	}
 	return &Hub{
-		serverID:  hex.EncodeToString(b),
-		projector: NewProjection(historyLimit),
-		clients:   make(map[uint64]chan Envelope),
+		serverID:       hex.EncodeToString(b),
+		projector:      NewProjection(historyLimit),
+		clients:        make(map[uint64]chan Envelope),
+		commandHistory: newCommandHistoryAuthority(),
 	}
 }
 
@@ -117,8 +119,73 @@ func (h *Hub) Subscribe() (Subscription, Envelope) {
 		ModeNames:       append([]string(nil), h.modeNames...),
 		Accounts:        cloneAccounts(h.accounts),
 		CredentialStore: cloneCredentialStoreStatus(h.credentialStore),
+		CommandHistory:  commandHistoryUpdatePointer(h.commandHistory.snapshot()),
 	}
 	return Subscription{ID: id, Messages: ch}, snapshot
+}
+
+// LookupTypedCommand returns a previously committed browser-scoped submission
+// before the caller performs any game-side effect. Server.opMu serializes the
+// lookup/send/commit transaction; Hub.mu protects the shared authority.
+func (h *Hub) LookupTypedCommand(
+	browserID, submissionID, disposition, input string,
+) (typedCommandResult, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.commandHistory.lookup(
+		browserID, submissionID, disposition, input,
+	)
+}
+
+// CommitTypedCommand appends accepted non-empty input and broadcasts its
+// server-ordered delta. Blank submissions are deduplicated but never enter
+// history and therefore do not generate a history update.
+func (h *Hub) CommitTypedCommand(
+	browserID, submissionID, disposition, input string,
+) (typedCommandResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	result, err := h.commandHistory.commit(
+		browserID, submissionID, disposition, input,
+	)
+	if err != nil || result.History.Entry == nil || h.closed {
+		return result, err
+	}
+	h.sequence++
+	update := result.History
+	h.broadcastLocked(Envelope{
+		Type:           "commandHistory",
+		Protocol:       ProtocolVersion,
+		ServerID:       h.serverID,
+		Sequence:       h.sequence,
+		CommandHistory: &update,
+	})
+	return result, nil
+}
+
+// ResetCommandHistory starts a new explicit game-login epoch and atomically
+// replaces every browser's history without touching any browser-local draft.
+func (h *Hub) ResetCommandHistory() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	update := h.commandHistory.reset()
+	h.sequence++
+	h.broadcastLocked(Envelope{
+		Type:           "commandHistory",
+		Protocol:       ProtocolVersion,
+		ServerID:       h.serverID,
+		Sequence:       h.sequence,
+		CommandHistory: &update,
+	})
+}
+
+func commandHistoryUpdatePointer(
+	update CommandHistoryUpdate,
+) *CommandHistoryUpdate {
+	return &update
 }
 
 func (h *Hub) Unsubscribe(id uint64) {

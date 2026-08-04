@@ -118,6 +118,25 @@ export interface WireEvent {
   debug?: DebugPayload;
 }
 
+export interface CommandHistoryEntry {
+  id: number;
+  text: string;
+}
+
+export interface CommandHistoryUpdate {
+  epoch: number;
+  revision: number;
+  replace?: boolean;
+  entries?: CommandHistoryEntry[];
+  entry?: CommandHistoryEntry;
+}
+
+export interface TypedCommandResult {
+  history: CommandHistoryUpdate;
+}
+
+export type TypedCommandDisposition = "game" | "history-only";
+
 // ---------------------------------------------------------------------------
 // Config types (mirror internal/config; JSON keys are Go field names -> PascalCase)
 // ---------------------------------------------------------------------------

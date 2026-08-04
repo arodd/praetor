@@ -430,12 +430,14 @@
     return line.segments;
   }
 
-  // Keyboard scroll controls mirror the on-screen buttons. Home/End override the
-  // game input's cursor-home/end (that input is single-line and short, so scroll
-  // control wins); PgUp/PgDn page the view, with PgDn-near-bottom acting as End.
+  // Keyboard scroll controls mirror the on-screen buttons. Home/End scroll the
+  // transcript unless the gameplay command field owns focus, where they retain
+  // their native single-line cursor behavior. PgUp/PgDn always page output.
   function onWindowKey(e: KeyboardEvent) {
     if (store.openModal || !viewport) return;
     if (searchEl && document.activeElement === searchEl) return;
+    const commandInputFocused = document.activeElement instanceof HTMLElement &&
+      document.activeElement.matches("[data-command-input]");
     switch (e.key) {
       case "PageUp":
         e.preventDefault();
@@ -446,10 +448,12 @@
         pageBy(1);
         break;
       case "Home":
+        if (commandInputFocused) break;
         e.preventDefault();
         toTop();
         break;
       case "End":
+        if (commandInputFocused) break;
         e.preventDefault();
         toEnd();
         break;

@@ -321,9 +321,26 @@ credentials.
   three minutes as well.
 - A settings change, script reload, mode switch, credential-store mutation, Kudos update,
   persistent-data clear, or command affects the shared process.
-- Input drafts, command history, active tab, scroll position, unread markers,
-  text selection, collapsed panels, and browser-notification permission remain
-  local to each browser.
+- Non-empty commands deliberately submitted through the gameplay command field
+  form one server-ordered, in-memory history shared by every authenticated
+  browser. The newest 1,000 entries are retained for the current explicit TEC
+  login epoch. A refresh, sign-out/sign-in, or event-socket reconnect receives
+  the same snapshot; a new TEC login or praetor-web restart clears it.
+- Input drafts, cursors, active completion/browse/search positions, active tab,
+  scroll position, unread markers, text selection, collapsed panels, and
+  browser-notification permission remain local to each browser. Keystrokes and
+  unfinished commands are never shared.
+
+Only accepted gameplay submissions and locally dispatched command-field
+actions such as `/help`, `/list`, and `/mode` enter submitted history. Blank
+lines, rejected gameplay sends, Lua/script traffic, action and compass buttons,
+status checks, and server echoes do not. History is not written to config,
+browser storage, cookies, transcripts, or disk. Anyone who knows the shared web
+password can read this submitted-command history. On touch-oriented layouts,
+the command field occupies a full row and the row beneath it provides the mode
+selector, a History button equivalent to Ctrl+R, and previous/next history
+buttons. The mobile keyboard's Enter key submits the command. A physical
+keyboard can also use Up/Down, Ctrl+R, and Tab prefix completion.
 
 All authenticated browsers are equally authorized. Do not share the web
 password with someone who should not be able to send commands, alter settings,

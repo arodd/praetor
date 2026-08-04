@@ -1,4 +1,10 @@
-import type { AppConfig, CredentialStoreStatus, InitState, WireEvent } from "./types";
+import type {
+  AppConfig,
+  CommandHistoryUpdate,
+  CredentialStoreStatus,
+  InitState,
+  WireEvent,
+} from "./types";
 
 export interface SystemUpdate {
   type:
@@ -8,7 +14,8 @@ export interface SystemUpdate {
     | "operation"
     | "auth-expired"
     | "auth-restored"
-    | "transport";
+    | "transport"
+    | "command-history";
   config?: AppConfig;
   revision?: number;
   modeNames?: string[];
@@ -16,6 +23,7 @@ export interface SystemUpdate {
   credentialStore?: CredentialStoreStatus;
   result?: { operation: string; ok: boolean; message?: string };
   transportState?: "connecting" | "connected" | "reconnecting";
+  commandHistory?: CommandHistoryUpdate;
 }
 
 export interface TransportHandlers {

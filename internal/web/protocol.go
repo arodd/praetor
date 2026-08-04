@@ -25,6 +25,7 @@ type Envelope struct {
 	ModeNames       []string                      `json:"modeNames,omitempty"`
 	Accounts        *[]string                     `json:"accounts,omitempty"`
 	CredentialStore *appgui.CredentialStoreStatus `json:"credentialStore,omitempty"`
+	CommandHistory  *CommandHistoryUpdate         `json:"commandHistory,omitempty"`
 	Result          *OperationResult              `json:"result,omitempty"`
 }
 

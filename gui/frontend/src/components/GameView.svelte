@@ -15,14 +15,13 @@
     return store.tabs.filter((t) => t.visible);
   }
 
-  function cycleTab(dir: number) {
-    const vis = visibleTabs();
-    if (vis.length === 0) return;
-    const cur = store.tabs[store.activeTab];
-    let idx = vis.indexOf(cur);
-    if (idx < 0) idx = 0;
-    idx = (idx + dir + vis.length) % vis.length;
-    store.selectTab(store.tabs.indexOf(vis[idx]));
+  function commandInputOwns(e: KeyboardEvent): boolean {
+    return e.composedPath().some(
+      (node) => node instanceof HTMLElement && node.matches("[data-command-input]"),
+    ) || (
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement.matches("[data-command-input]")
+    );
   }
 
   async function quickCycleMode() {
@@ -76,6 +75,24 @@
     // All other shortcuts are inert while a modal owns the keyboard.
     if (store.openModal) return;
 
+    // Tab now completes from submitted command history. Keep ownership in the
+    // capture phase: WebKitGTK can otherwise begin native focus traversal
+    // before InputLine's target/bubble handler prevents the default action.
+    // The request counter avoids handling the same keystroke a second time in
+    // InputLine while leaving all actual editor/history state component-local.
+    if (
+      e.code === "Tab" &&
+      !e.isComposing &&
+      e.keyCode !== 229 &&
+      commandInputOwns(e)
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      store.histCompleteDirection = e.shiftKey ? -1 : 1;
+      store.histCompleteRequest++;
+      return;
+    }
+
     // Ctrl+F opens the scrollback search bar; Ctrl+R steps the reverse history
     // search. Handled here in the capture phase so the webview's native
     // find/reload defaults can never fire, and stopPropagation keeps the
@@ -110,15 +127,6 @@
       return;
     }
 
-    // Match on e.code (physical key), not e.key: on X11/WebKitGTK, Shift+Tab
-    // emits the ISO_Left_Tab keysym, so e.key is NOT "Tab" for the reverse case
-    // — an e.key check catches forward Tab but silently misses Shift+Tab.
-    // e.code stays "Tab" regardless of the Shift modifier.
-    if (e.code === "Tab") {
-      e.preventDefault();
-      cycleTab(e.shiftKey ? -1 : 1);
-      return;
-    }
     if (e.altKey) {
       // Match on e.code (physical key), not e.key: on macOS, Option+<key>
       // rewrites e.key to a composed character (Option+I -> "ˆ", Option+1 ->
@@ -159,10 +167,8 @@
 
   const activeTab = $derived(store.tabs[store.activeTab]);
 
-  // Register keydown in the CAPTURE phase. A bubble-phase handler's
-  // preventDefault runs too late in WebKitGTK to stop native Tab focus
-  // traversal, so Shift+Tab moved focus through the UI's many buttons instead
-  // of cycling tabs. Capturing lets preventDefault win before traversal.
+  // Register keydown in the capture phase so browser/webview defaults cannot
+  // outrun command completion, history search, or other global shortcuts.
   onMount(() => {
     window.addEventListener("keydown", onKeydown, true);
     return () => window.removeEventListener("keydown", onKeydown, true);

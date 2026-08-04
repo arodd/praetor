@@ -60,6 +60,8 @@
     } else if (update.type === "transport" && update.transportState) {
       store.transportState = update.transportState;
       store.transportReady = update.transportState === "connected";
+    } else if (update.type === "command-history" && update.commandHistory) {
+      store.applyCommandHistory(update.commandHistory);
     }
   }
 

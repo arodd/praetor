@@ -161,6 +161,11 @@ make clean    # Remove built binaries
 
 `praetor-web` owns one shared TEC connection. Every browser that knows the preshared web password is an equally authorized operator: commands, login/logout, modes, settings, script reloads, credentials, and persistent-data actions affect that shared process. Signing out of the web UI affects only the requesting browser; disconnecting the game affects all browsers.
 
+The newest 1,000 non-empty commands deliberately submitted through the web
+command field are also shared in process memory across authenticated browsers
+for the current TEC login. Drafts, cursor/completion state, and keystrokes stay
+private to each tab; a new TEC login or server restart clears the shared list.
+
 The password is read only from `PRAETOR_WEB_PASSWORD` at startup and is mandatory. The default listener is loopback-only and uses an automatically generated, persistent self-signed TLS certificate:
 
 ```bash
@@ -183,7 +188,7 @@ Praetor shows a splash screen, then either an account selection screen (if you h
 
 | Key | Action |
 |-----|--------|
-| Tab / Shift+Tab | Next / previous tab |
+| Tab / Shift+Tab | Complete a command from submitted history / reverse through matches |
 | Alt+1..9, Alt+0 | Jump to tab (0 = 10th) |
 | Alt+S | Toggle sidebar |
 | Alt+M | Quick-cycle automation mode |
@@ -191,6 +196,8 @@ Praetor shows a splash screen, then either an account selection screen (if you h
 | Ctrl+C | Clear input / confirm quit |
 | Ctrl+F | Search scrollback (GUI) |
 | Ctrl+R | Search command history (GUI) |
+| Up / Down | Browse older / newer submitted commands |
+| Home / End | Move to the start / end of the command input (GUI) |
 | PgUp / PgDn | Scroll output |
 | Mouse wheel | Scroll output |
 | Enter (empty) | Send blank line to server |

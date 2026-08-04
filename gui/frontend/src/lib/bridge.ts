@@ -21,6 +21,8 @@ import type {
   PlayState,
   AccountState,
   ConnectResult,
+  TypedCommandDisposition,
+  TypedCommandResult,
 } from "./types";
 import type { PraetorTransport, SystemUpdate } from "./transport";
 import { WebAuthRequiredError } from "./transport";
@@ -94,6 +96,17 @@ export const disconnect = () => call<void>("Disconnect", undefined);
 
 // ---- Input / modes ----
 export const send = (input: string) => call<void>("Send", undefined, input);
+export const submitTypedCommand = (
+  input: string,
+  disposition: TypedCommandDisposition,
+  submissionId: string,
+) => call<TypedCommandResult>(
+  "SubmitTypedCommand",
+  { history: { epoch: 0, revision: 0 } },
+  input,
+  disposition,
+  submissionId,
+);
 export const modeNames = () => call<string[]>("ModeNames", []);
 export const currentMode = () => call<string>("CurrentMode", "");
 export const setMode = (name: string, args: string[]) =>

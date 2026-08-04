@@ -240,13 +240,16 @@ These key bindings are always available during gameplay:
 
 | Key | Action |
 |-----|--------|
-| **Tab** / **Shift+Tab** | Next / previous tab |
+| **Tab** / **Shift+Tab** | Complete the current prefix from submitted command history / reverse through matches |
 | **Alt+1** through **Alt+9**, **Alt+0** | Jump directly to a tab (0 = 10th) |
 | **Alt+S** | Toggle the sidebar (minimap, compass, status bars) |
 | **Alt+M** | Cycle to the next automation mode |
 | **Alt+X** | Disable all automation |
 | **Esc** | Open the menu |
 | **Ctrl+C** | Clear input line, or press twice to quit |
+| **Ctrl+R** | Search submitted command history; repeat for older matches |
 | **PgUp** / **PgDn** | Scroll output |
+| **Up** / **Down** | Browse older / newer submitted commands |
+| **Home** / **End** | Move to the start / end of the command input |
 | **Mouse wheel** | Scroll output (3 lines per tick) |
 | **Enter** (empty input) | Send a blank line to the server |

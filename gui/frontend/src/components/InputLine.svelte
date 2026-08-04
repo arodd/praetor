@@ -17,12 +17,29 @@
   import type { PlayState } from "../lib/types";
   import CommandHint from "./CommandHint.svelte";
   import { matchCommands } from "../lib/commands";
+  import {
+    browseNext,
+    browsePrevious,
+    completeFromHistory,
+    emptyBrowseState,
+    emptyCompletionState,
+    type HistoryBrowseResult,
+  } from "../lib/command-history";
 
   let value = $state("");
   let inputEl: HTMLTextAreaElement;
-  let history: string[] = [];
-  let histIdx = $state(-1); // -1 = current (not navigating)
+  let historyBrowse = $state(emptyBrowseState());
+  let historyCompletion = $state(emptyCompletionState());
   let submitting = $state(false);
+  let pendingSubmission = $state<{ text: string; id: string } | null>(null);
+  // Local UI commands execute immediately. Web history recording follows
+  // through this bounded, memory-only outbox so a brief HTTP/socket recovery
+  // cannot make /help, /list, or another local action fail or run twice.
+  const HISTORY_ONLY_OUTBOX_LIMIT = 64;
+  const HISTORY_ONLY_RETRY_MS = 1000;
+  let historyOnlyOutbox: { text: string; id: string }[] = [];
+  let historyOnlyFlushing = false;
+  let historyOnlyRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Passive hint above the input. matchCommands returns [] for anything that is
   // not a slash command, so this is empty for ordinary game text.
@@ -36,6 +53,7 @@
   let rsFailed = $state(false);
   let rsIndex = 0; // history index of the current match
   let rsSaved = ""; // input contents before the search began (restored on Esc)
+  let rsHistory: string[] = [];
   // Live performance status for the input-bar indicator. Polled only while a
   // performance is running: a step counter that visibly advances is what tells
   // the performer a long %wait or cue wait is a deliberate hold rather than a
@@ -223,6 +241,15 @@
     return lowercaseFirstCommandLetter(input);
   }
 
+  function resetHistoryNavigation(nextDraft = value, cursor = nextDraft.length) {
+    historyBrowse = {
+      selectedId: null,
+      draft: nextDraft,
+      draftCursor: Math.max(0, Math.min(cursor, nextDraft.length)),
+    };
+    historyCompletion = emptyCompletionState();
+  }
+
   function onInput(e: Event) {
     // Paste and IME commits accept the current reverse-history match before
     // applying mobile capitalization normalization.
@@ -231,6 +258,8 @@
     const original = target.value;
     const normalized = normalizeMobileCommand(original);
     value = normalized;
+    resetHistoryNavigation(normalized, target.selectionStart ?? normalized.length);
+    if (pendingSubmission?.text !== normalized) pendingSubmission = null;
     if (normalized === original) return;
 
     // Lowercasing can change UTF-16 length for a small number of Unicode
@@ -317,13 +346,91 @@
     }
   }
 
-  function pushHistory(line: string) {
-    if (line.trim() !== "") {
-      history.push(line);
-      if (history.length > 200) history.shift();
+  function submissionID(line: string): string {
+    if (pendingSubmission?.text === line) return pendingSubmission.id;
+    const id = typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : `cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    pendingSubmission = { text: line, id };
+    return id;
+  }
+
+  async function dispatchTyped(
+    line: string,
+    disposition: "game" | "history-only",
+    id: string,
+  ) {
+    if (api.inWeb()) {
+      await api.submitTypedCommand(line, disposition, id);
+    } else if (disposition === "game") {
+      await api.send(line);
     }
-    histIdx = -1;
+  }
+
+  function finishSubmission(line: string) {
+    if (!api.inWeb()) store.appendLocalCommandHistory(line);
+    pendingSubmission = null;
     value = "";
+    resetHistoryNavigation("", 0);
+  }
+
+  function removeHistoryOnlyEntry(entry: { text: string; id: string }) {
+    if (historyOnlyOutbox[0] === entry) {
+      historyOnlyOutbox.shift();
+      return;
+    }
+    const index = historyOnlyOutbox.findIndex((candidate) => candidate.id === entry.id);
+    if (index >= 0) historyOnlyOutbox.splice(index, 1);
+  }
+
+  function scheduleHistoryOnlyRetry() {
+    if (historyOnlyRetryTimer !== undefined || historyOnlyOutbox.length === 0) return;
+    historyOnlyRetryTimer = setTimeout(() => {
+      historyOnlyRetryTimer = undefined;
+      void flushHistoryOnlyOutbox();
+    }, HISTORY_ONLY_RETRY_MS);
+  }
+
+  async function flushHistoryOnlyOutbox() {
+    if (historyOnlyFlushing || !store.transportReady || historyOnlyOutbox.length === 0) return;
+    historyOnlyFlushing = true;
+    let retry = false;
+    try {
+      while (store.transportReady && historyOnlyOutbox.length > 0) {
+        const entry = historyOnlyOutbox[0];
+        try {
+          await api.submitTypedCommand(entry.text, "history-only", entry.id);
+          removeHistoryOnlyEntry(entry);
+        } catch {
+          // Keep the same browser-scoped submission ID. If the server accepted
+          // the request but the response was lost, its dedupe window returns
+          // the original history entry without appending a second copy.
+          retry = true;
+          break;
+        }
+      }
+    } finally {
+      historyOnlyFlushing = false;
+    }
+    if (retry) scheduleHistoryOnlyRetry();
+  }
+
+  function queueLocalHistory(line: string, id: string) {
+    if (!api.inWeb() || line.trim() === "") return;
+    if (historyOnlyOutbox.length >= HISTORY_ONLY_OUTBOX_LIMIT) {
+      historyOnlyOutbox.shift();
+      store.addToast(
+        "Command history delayed",
+        "The oldest unsynchronized local command was discarded.",
+      );
+    }
+    historyOnlyOutbox.push({ text: line, id });
+    void flushHistoryOnlyOutbox();
+  }
+
+  function finishLocalSubmission(line: string, id: string) {
+    finishSubmission(line);
+    queueLocalHistory(line, id);
   }
 
   async function submitOnce() {
@@ -331,6 +438,7 @@
     if (line !== value) value = line;
     const trimmed = line.trim();
     const lower = trimmed.toLowerCase();
+    const id = submissionID(line);
 
     // Ask the backend rather than trusting a cached flag: a performance can end
     // on its own (script finished, send failed), and a stale "playing" flag
@@ -339,32 +447,32 @@
     store.playActive = playing; // keep the UI hint in sync as a side effect
     if (playing && !isAllowedDuringPlay(line)) {
       store.addToast("Performance running", "Only /pause, /resume, /stop, /next (or Alt+X) are accepted.");
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       return;
     }
     if (lower === "/pause") {
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       if (!(await api.pausePlay())) store.addToast("Play", "Nothing is playing.");
       return;
     }
     if (lower === "/resume") {
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       if (!(await api.resumePlay())) store.addToast("Play", "Nothing is paused.");
       return;
     }
     if (lower === "/stop") {
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       store.playActive = false;
       if (!(await api.stopPlay())) store.addToast("Play", "Nothing is playing.");
       return;
     }
     if (lower === "/next") {
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       await api.nextPlayStep();
       return;
     }
     if (lower === "/play") {
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       await openPlayPicker();
       return;
     }
@@ -372,30 +480,30 @@
     // Local commands handled by the UI (mirrors the TUI wrapper).
     if (lower === "/help") {
       store.openModal = "help";
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       return;
     }
     if (lower === "/list") {
       // Open the mode selector (a columnar, clickable list) rather than a
       // comma-separated toast.
       store.openModal = "modeselect";
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       return;
     }
     // /kudos family (open menu / add favorite / queue) — handled here because
     // the shared core does not interpret /kudos (it's a UI concern).
     if (lower === "/kudos" || lower.startsWith("/kudos ") || lower.startsWith("/kudos\t")) {
       await handleKudos(trimmed.slice("/kudos".length).trim());
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       return;
     }
     if (lower === "/notes" || lower.startsWith("/notes ") || lower.startsWith("/notes\t")) {
       await handleNotes(trimmed.slice("/notes".length).trim());
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       return;
     }
     if (lower === "/send") {
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       if (store.connState !== "connected") {
         store.addToast("Send", "Not connected — nothing was sent.");
         return;
@@ -417,7 +525,7 @@
       const mode = raw ? resolveModeName(raw, store.modeNames) : raw;
       if (raw && mode === null) {
         store.addToast("Unknown mode", `"${raw}" — type /list to see available modes`);
-        pushHistory(line);
+        finishLocalSubmission(line, id);
         return;
       }
       try {
@@ -425,13 +533,13 @@
       } catch (e) {
         store.addToast("Mode error", String(e));
       }
-      pushHistory(line);
+      finishLocalSubmission(line, id);
       return;
     }
 
     // Everything else routes to the core (which interprets other /slash cmds).
-    await api.send(line);
-    pushHistory(line);
+    await dispatchTyped(line, "game", id);
+    finishSubmission(line);
   }
 
   async function submit() {
@@ -460,20 +568,93 @@
 
   // ---- Reverse history search --------------------------------------------
 
+  function applyBrowseResult(result: HistoryBrowseResult) {
+    historyBrowse = result.state;
+    historyCompletion = emptyCompletionState();
+    value = result.text;
+    void tick().then(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(result.cursor, result.cursor);
+    });
+  }
+
+  function historyPrevious() {
+    if (store.histSearchActive) rsAccept();
+    applyBrowseResult(browsePrevious(
+      store.commandHistory.entries,
+      historyBrowse,
+      value,
+      inputEl?.selectionStart ?? value.length,
+    ));
+  }
+
+  function historyNext() {
+    if (store.histSearchActive) rsAccept();
+    applyBrowseResult(browseNext(
+      store.commandHistory.entries,
+      historyBrowse,
+      value,
+      inputEl?.selectionStart ?? value.length,
+    ));
+  }
+
+  function requestHistorySearch() {
+    if (
+      !store.transportReady ||
+      submitting ||
+      store.commandHistory.entries.length === 0
+    ) return;
+    // This is the touch equivalent of Ctrl+R. The first press opens reverse
+    // search; subsequent presses step through older matches using the same
+    // component-local frozen history view as the physical shortcut.
+    store.histSearchRequest++;
+    inputEl?.focus();
+  }
+
+  function historyComplete(direction: 1 | -1) {
+    const draftText = value;
+    const draftCursor = inputEl?.selectionStart ?? value.length;
+    const result = completeFromHistory(
+      store.commandHistory.entries,
+      value,
+      historyCompletion,
+      direction,
+    );
+    historyCompletion = result.state;
+    if (!result.matched) return;
+    if (historyBrowse.selectedId === null) {
+      historyBrowse = {
+        selectedId: result.entryId,
+        draft: draftText,
+        draftCursor,
+      };
+    } else {
+      historyBrowse = { ...historyBrowse, selectedId: result.entryId };
+    }
+    value = result.text;
+    void tick().then(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(result.text.length, result.text.length);
+    });
+  }
+
   function rsBegin() {
     store.histSearchActive = true;
     rsSaved = value;
     rsQuery = "";
     rsFailed = false;
-    rsIndex = history.length; // first Ctrl+R step scans from the newest entry
+    // Freeze one search view so another browser's append does not move the
+    // currently previewed result. A repeated/new search takes a fresh view.
+    rsHistory = store.commandHistory.entries.map((entry) => entry.text);
+    rsIndex = rsHistory.length; // first Ctrl+R step scans from the newest entry
   }
 
   // rsStep advances to the next-older match (repeat Ctrl+R).
   function rsStep() {
-    const idx = searchBackward(history, rsQuery, rsIndex - 1);
+    const idx = searchBackward(rsHistory, rsQuery, rsIndex - 1);
     if (idx >= 0) {
       rsIndex = idx;
-      value = history[idx];
+      value = rsHistory[idx];
       rsFailed = false;
     } else if (rsQuery !== "") {
       rsFailed = true;
@@ -482,10 +663,10 @@
 
   // rsSearchFresh re-runs the search from the newest entry (query changed).
   function rsSearchFresh() {
-    const idx = searchBackward(history, rsQuery, history.length - 1);
+    const idx = searchBackward(rsHistory, rsQuery, rsHistory.length - 1);
     if (idx >= 0) {
       rsIndex = idx;
-      value = history[idx];
+      value = rsHistory[idx];
       rsFailed = false;
     } else {
       rsFailed = rsQuery !== "";
@@ -495,13 +676,13 @@
 
   function rsAccept() {
     store.histSearchActive = false;
-    histIdx = -1;
+    resetHistoryNavigation(value, inputEl?.selectionStart ?? value.length);
   }
 
   function rsCancel() {
     store.histSearchActive = false;
     value = rsSaved;
-    histIdx = -1;
+    resetHistoryNavigation(value, value.length);
   }
 
   // GameView bumps these counters from its capture-phase key handling.
@@ -520,6 +701,41 @@
     if (req === lastRsCancel) return;
     lastRsCancel = req;
     if (store.histSearchActive) rsCancel();
+  });
+
+  let lastCompletionReq = 0;
+  $effect(() => {
+    const req = store.histCompleteRequest;
+    if (req === lastCompletionReq) return;
+    lastCompletionReq = req;
+    if (store.histSearchActive) rsAccept();
+    historyComplete(store.histCompleteDirection);
+    inputEl?.focus();
+  });
+
+  let observedHistoryEpoch = store.commandHistory.epoch;
+  $effect(() => {
+    const epoch = store.commandHistory.epoch;
+    if (epoch === observedHistoryEpoch) return;
+    observedHistoryEpoch = epoch;
+    historyOnlyOutbox = [];
+    if (historyOnlyRetryTimer !== undefined) clearTimeout(historyOnlyRetryTimer);
+    historyOnlyRetryTimer = undefined;
+    if (store.histSearchActive) rsCancel();
+    resetHistoryNavigation(value, inputEl?.selectionStart ?? value.length);
+  });
+
+  $effect(() => {
+    if (store.transportReady) void flushHistoryOnlyOutbox();
+  });
+
+  $effect(() => {
+    const selectedId = historyBrowse.selectedId;
+    const entries = store.commandHistory.entries;
+    if (selectedId === null || entries.some((entry) => entry.id === selectedId)) return;
+    // Retention eviction detaches the visible recalled text; it never replaces
+    // or clears what the operator is editing.
+    resetHistoryNavigation(value, inputEl?.selectionStart ?? value.length);
   });
 
   // rsKeydown consumes keys while the history search is active. Returns true
@@ -585,23 +801,29 @@
       submit();
     } else if (e.key === "ArrowUp") {
       if (!caretOnFirstLine(value, inputEl.selectionStart)) return;
-      if (history.length === 0) return;
       e.preventDefault();
-      if (histIdx === -1) histIdx = history.length - 1;
-      else if (histIdx > 0) histIdx--;
-      value = history[histIdx] ?? "";
+      historyPrevious();
     } else if (e.key === "ArrowDown") {
       if (!caretOnLastLine(value, inputEl.selectionEnd)) return;
-      if (histIdx === -1) return;
       e.preventDefault();
-      if (histIdx < history.length - 1) {
-        histIdx++;
-        value = history[histIdx] ?? "";
-      } else {
-        histIdx = -1;
-        value = "";
-      }
+      historyNext();
+    } else if (e.code === "Tab") {
+      // Tab belongs to command-history completion, not output-tab selection or
+      // browser focus traversal. Shift+Tab walks the same frozen match set in
+      // the opposite direction.
+      e.preventDefault();
+      e.stopPropagation();
+      historyComplete(e.shiftKey ? -1 : 1);
+    } else if (e.key === "Home" || e.key === "End") {
+      // Preserve the input's native cursor behavior while keeping OutputPane's
+      // global Home/End listener from scrolling the transcript.
+      e.stopPropagation();
     }
+  }
+
+  function preserveInputFocus(e: PointerEvent) {
+    // Touching history controls must not dismiss the mobile software keyboard.
+    e.preventDefault();
   }
 
   // Grow the textarea with its content up to a cap, then scroll — Orchil caps at
@@ -643,6 +865,8 @@
     if (store.inputPrefill) {
       value = store.inputPrefill;
       store.inputPrefill = "";
+      pendingSubmission = null;
+      resetHistoryNavigation(value, value.length);
       if (stickyFocusEnabled()) queueMicrotask(() => inputEl?.focus());
     }
   });
@@ -746,6 +970,8 @@
 
   onDestroy(() => {
     if (mobileToolReleaseTimer !== undefined) clearTimeout(mobileToolReleaseTimer);
+    if (historyOnlyRetryTimer !== undefined) clearTimeout(historyOnlyRetryTimer);
+    historyOnlyOutbox = [];
     stopKeyboardViewportCorrection();
     store.mobileCommandInputActive = false;
   });
@@ -773,6 +999,7 @@
     <span class="prompt">›</span>
     <textarea
       rows="1"
+      data-command-input
       bind:this={inputEl}
       bind:value
       onkeydown={onKeydown}
@@ -782,6 +1009,7 @@
       spellcheck={store.config?.UI?.InputSpellcheck ?? true}
       autocomplete="off"
       autocapitalize={api.inWeb() && (store.config?.UI?.MobileLowercaseFirstLetter ?? false) ? "none" : "sentences"}
+      enterkeyhint="send"
       disabled={!store.transportReady || submitting}
       placeholder={store.connState === "connected" ? "" : "(disconnected)"}
     ></textarea>
@@ -804,8 +1032,8 @@
         {play.step}/{play.total}
       {/if}
     </button>
-    <button class="send" onclick={submit} aria-label="Send command" disabled={!store.transportReady || submitting}>Send</button>
     <button
+      type="button"
       class="mode"
       class:active={!!store.mode && store.mode !== "disable"}
       title="Switch mode"
@@ -815,6 +1043,39 @@
     >
       {store.mode && store.mode !== "disable" ? store.mode : "disable"}
     </button>
+    <div class="mobile-controls" data-mobile-tools aria-label="Command history">
+      <button
+        type="button"
+        class="history-search"
+        class:active={store.histSearchActive}
+        aria-label={store.histSearchActive ? "Search older command history result (Ctrl-R)" : "Search command history (Ctrl-R)"}
+        title={store.histSearchActive ? "Older history match (Ctrl-R)" : "Search command history (Ctrl-R)"}
+        tabindex="-1"
+        onpointerdown={preserveInputFocus}
+        onclick={requestHistorySearch}
+        disabled={!store.transportReady || submitting || store.commandHistory.entries.length === 0}
+      >{store.histSearchActive ? "Older" : "History"}</button>
+      <button
+        type="button"
+        class="history-button"
+        aria-label="Previous command"
+        title="Previous command"
+        tabindex="-1"
+        onpointerdown={preserveInputFocus}
+        onclick={historyPrevious}
+        disabled={!store.transportReady || submitting || store.commandHistory.entries.length === 0}
+      >▲</button>
+      <button
+        type="button"
+        class="history-button"
+        aria-label="Next command or draft"
+        title="Next command or draft"
+        tabindex="-1"
+        onpointerdown={preserveInputFocus}
+        onclick={historyNext}
+        disabled={!store.transportReady || submitting || historyBrowse.selectedId === null}
+      >▼</button>
+    </div>
   </div>
 </div>
 
@@ -914,33 +1175,68 @@
     color: var(--accent);
     border-color: var(--accent-dim);
   }
-  .send {
+  .mobile-controls {
     display: none;
   }
 
   @media (max-width: 899px), (pointer: coarse) {
     .inputbar {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
       gap: 6px;
       padding: 7px 8px;
     }
     .prompt {
       display: none;
     }
+    .play {
+      grid-row: 2;
+      grid-column: 1;
+      min-height: 44px;
+    }
     textarea {
+      box-sizing: border-box;
+      grid-column: 1 / -1;
       min-width: 0;
       min-height: 44px;
+      width: 100%;
       font-size: 16px;
     }
-    .send {
-      display: block;
-      min-width: 58px;
+    .mobile-controls {
+      display: flex;
+      gap: 4px;
+      grid-column: 3;
+      grid-row: 2;
+    }
+    .history-button,
+    .history-search {
+      min-width: 44px;
       min-height: 44px;
-      border-color: var(--accent);
+      padding: 0;
+      border-color: var(--border);
+      color: var(--fg-dim);
+      background: var(--bg-elevated);
+      font-family: var(--mono);
+    }
+    .history-search {
+      min-width: 68px;
+      padding-inline: 8px;
+    }
+    .history-search.active {
+      border-color: var(--accent-dim);
       color: var(--accent);
     }
+    .history-button:disabled,
+    .history-search:disabled {
+      opacity: 0.4;
+    }
     .mode {
+      grid-column: 2;
+      grid-row: 2;
+      justify-self: stretch;
+      min-width: 0;
       min-height: 44px;
-      max-width: 92px;
+      max-width: none;
       overflow: hidden;
       padding-inline: 8px;
       text-overflow: ellipsis;

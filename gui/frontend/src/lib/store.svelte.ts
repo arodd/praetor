@@ -16,8 +16,14 @@ import type {
   SuppressPayload,
   WireEvent,
   CredentialStoreStatus,
+  CommandHistoryUpdate,
 } from "./types";
 import { Kind } from "./types";
+import {
+  appendLocalCommandHistory,
+  applyCommandHistoryUpdate,
+  emptyHistoryState,
+} from "./command-history";
 
 // Extra lines the scrollback buffer may hold above the configured cap before a
 // front-trim runs, so the O(n) keyed-each reconciliation amortizes over a burst.
@@ -192,6 +198,16 @@ class AppStore {
   histSearchRequest = $state(0);
   histSearchCancel = $state(0);
   histSearchActive = $state(false);
+  // GameView owns Tab in the capture phase so WebKitGTK cannot begin native
+  // focus traversal before InputLine handles it. These fields carry that one
+  // editor-local completion request without moving draft state into the store.
+  histCompleteRequest = $state(0);
+  histCompleteDirection = $state<1 | -1>(1);
+  // Deliberately submitted command text. Web snapshots/deltas make this one
+  // shared in-memory history across authenticated browsers; Wails appends to
+  // the same frontend model locally. Drafts and navigation state remain in
+  // InputLine and are never projected.
+  commandHistory = $state(emptyHistoryState());
   // Global reveal of all suppressed lines (Alt+I), complementing per-line click.
   expandAllSuppressed = $state(false);
   // Where Esc goes from the currently-open modal: "menu" for submenus (with a
@@ -354,13 +370,22 @@ class AppStore {
   }
 
   // installSnapshot replaces only shared game-session state. Config/account
-  // metadata is delivered separately, while browser-local UI state such as
-  // collapsed panels and input history remains owned by the browser.
+  // metadata and submitted command history are delivered separately, while
+  // browser-local UI state such as collapsed panels, unfinished drafts, and
+  // history-navigation positions remains owned by the browser.
   installSnapshot(events: WireEvent[]) {
     this.resetSession();
     this.connState = "disconnected";
     this.connReason = "";
     this.apply(events);
+  }
+
+  applyCommandHistory(update: CommandHistoryUpdate) {
+    this.commandHistory = applyCommandHistoryUpdate(this.commandHistory, update);
+  }
+
+  appendLocalCommandHistory(text: string) {
+    this.commandHistory = appendLocalCommandHistory(this.commandHistory, text);
   }
 
   installConfig(config: AppConfig) {

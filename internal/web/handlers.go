@@ -39,6 +39,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, _ string)
 		return
 	}
 	s.conn = "connecting"
+	s.hub.ResetCommandHistory()
 	result, err := s.app.ConnectNew(req.Username, req.Password, req.Store)
 	req.Password = ""
 	if err != nil {
@@ -70,6 +71,7 @@ func (s *Server) handleConnectStored(w http.ResponseWriter, r *http.Request, _ s
 		return
 	}
 	s.conn = "connecting"
+	s.hub.ResetCommandHistory()
 	if err := s.app.ConnectStored(req.Username); err != nil {
 		s.conn = "disconnected"
 		s.log.Printf("web stored-account connect failed: %v", err)
@@ -136,6 +138,95 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request, _ string)
 	s.app.Send(req.Input)
 	s.opMu.Unlock()
 	s.writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleTypedCommand(
+	w http.ResponseWriter, r *http.Request, _ string,
+) {
+	var req struct {
+		Input        string `json:"input"`
+		Disposition  string `json:"disposition"`
+		SubmissionID string `json:"submissionId"`
+	}
+	if err := decodeJSON(r, &req); err != nil ||
+		(req.Disposition != "game" && req.Disposition != "history-only") ||
+		!validCommandSubmissionID(req.SubmissionID) {
+		s.writeError(
+			w, http.StatusBadRequest, "invalid_request",
+			"Invalid typed-command request.",
+		)
+		return
+	}
+	if len(req.Input) > maxCommandBody {
+		s.writeError(
+			w, http.StatusRequestEntityTooLarge, "command_too_large",
+			"Command is too large.",
+		)
+		return
+	}
+	browserID, _ := r.Context().Value(browserIDContextKey{}).(string)
+	if browserID == "" {
+		s.writeError(
+			w, http.StatusUnauthorized, "unauthorized",
+			"Authentication required.",
+		)
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	if prior, ok, err := s.hub.LookupTypedCommand(
+		browserID, req.SubmissionID, req.Disposition, req.Input,
+	); err != nil {
+		s.writeError(
+			w, http.StatusConflict, "submission_id_reused",
+			"The command submission ID was already used.",
+		)
+		return
+	} else if ok {
+		s.writeJSON(w, http.StatusAccepted, prior)
+		return
+	}
+	// Locally handled UI commands (/help, /list, /mode, ...) do not touch the
+	// game connection. Recording one in typed history must therefore remain
+	// available while TEC is disconnected or connecting; only actual gameplay
+	// sends require an active shared session.
+	if req.Disposition == "game" && s.conn != "connected" {
+		s.writeError(
+			w, http.StatusConflict, "session_not_connected",
+			"The shared game session is not connected.",
+		)
+		return
+	}
+	if req.Disposition == "game" {
+		s.app.Send(req.Input)
+	}
+	result, err := s.hub.CommitTypedCommand(
+		browserID, req.SubmissionID, req.Disposition, req.Input,
+	)
+	if err != nil {
+		s.writeError(
+			w, http.StatusConflict, "submission_id_reused",
+			"The command submission ID was already used.",
+		)
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, result)
+}
+
+func validCommandSubmissionID(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' || r == '-' || r == '_' || r == ':' ||
+			r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleAccounts(w http.ResponseWriter, _ *http.Request, _ string) {

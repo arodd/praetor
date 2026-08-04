@@ -99,6 +99,88 @@ describe("web transport operation parity", () => {
     expect(revisions).toEqual([1, 3]);
   });
 
+  it("submits typed commands and folds HTTP plus ordered socket history updates", async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => new Response(JSON.stringify({
+      history: {
+        epoch: 3,
+        revision: 2,
+        entry: { id: 2, text: "look" },
+      },
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const transport = new WebTransport();
+    const updates: any[] = [];
+    transport.subscribe({
+      events: () => {},
+      system: (update) => {
+        if (update.type === "command-history") updates.push(update.commandHistory);
+      },
+    });
+    (transport as any).handleEnvelope({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 5,
+      commandHistory: {
+        epoch: 3,
+        revision: 1,
+        replace: true,
+        entries: [{ id: 1, text: "skills" }],
+      },
+    });
+
+    await transport.invoke(
+      "SubmitTypedCommand",
+      undefined,
+      "look",
+      "game",
+      "browser-request-1",
+    );
+    (transport as any).handleEnvelope({
+      type: "commandHistory",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 6,
+      commandHistory: {
+        epoch: 3,
+        revision: 2,
+        entry: { id: 2, text: "look" },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/typed-commands");
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(request.method).toBe("POST");
+    expect(JSON.parse(String(request.body))).toEqual({
+      input: "look",
+      disposition: "game",
+      submissionId: "browser-request-1",
+    });
+    expect(updates).toEqual([
+      {
+        epoch: 3,
+        revision: 1,
+        replace: true,
+        entries: [{ id: 1, text: "skills" }],
+      },
+      {
+        epoch: 3,
+        revision: 2,
+        entry: { id: 2, text: "look" },
+      },
+      {
+        epoch: 3,
+        revision: 2,
+        entry: { id: 2, text: "look" },
+      },
+    ]);
+  });
+
   it("returns a successful connection separately from a credential-save warning", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       connected: true,
