@@ -32,6 +32,8 @@ type styleState struct {
 //   - <font color="#hex"> → Color
 //   - <xch_cmd>  → Underline
 //   - <xch_page clear="text"> → ClearPage=true
+//   - <table>    → Captions and rows on separate lines, cells separated by spaces
+//   - <th>       → Bold table cell
 //   - Other tags  → stripped, content preserved
 //
 // HTML entities (&lt; &gt; &amp; &quot;) are decoded.
@@ -65,6 +67,9 @@ func ParseHTMLWithIndent(input string, startIndent int) HTMLResult {
 	var stack []stackEntry
 	cur := styleState{}
 	indentLevel := startIndent // tracks <ul> nesting depth, carried from prior lines
+	tableDepth := 0
+	tableCells := 0
+	tableBreakPending := false
 
 	// segBuf accumulates text for the current styled segment.
 	var segBuf strings.Builder
@@ -80,6 +85,20 @@ func ParseHTMLWithIndent(input string, startIndent int) HTMLResult {
 			})
 			segBuf.Reset()
 		}
+	}
+
+	appendLayout := func(text string) {
+		flushSeg()
+		textBuf.WriteString(text)
+		segBuf.WriteString(text)
+		flushSeg()
+	}
+
+	ensureLineBreak := func() {
+		if textBuf.Len() == 0 || strings.HasSuffix(textBuf.String(), "\n") {
+			return
+		}
+		appendLayout("\n")
 	}
 
 	recalcStyle := func() {
@@ -159,6 +178,12 @@ func ParseHTMLWithIndent(input string, startIndent int) HTMLResult {
 					}
 					continue
 				}
+				if closeName == "table" && tableDepth > 0 {
+					tableDepth--
+					if tableDepth == 0 {
+						tableBreakPending = true
+					}
+				}
 				// Pop matching stack entry.
 				for j := len(stack) - 1; j >= 0; j-- {
 					if stack[j].tag == closeName {
@@ -189,9 +214,37 @@ func ParseHTMLWithIndent(input string, startIndent int) HTMLResult {
 				continue
 			}
 
+			// TEC emits complete inventory and attribute tables in one protocol
+			// record. Preserve their block, row, and cell boundaries in the shared
+			// text projection so every renderer remains readable without accepting
+			// server HTML into a browser DOM.
+			switch tagName {
+			case "table":
+				if tableDepth == 0 {
+					ensureLineBreak()
+					tableBreakPending = false
+				}
+				tableDepth++
+				tableCells = 0
+			case "tr":
+				if tableDepth > 0 {
+					ensureLineBreak()
+					tableCells = 0
+				}
+			case "td", "th":
+				if tableDepth > 0 {
+					if tableCells > 0 {
+						appendLayout("  ")
+					}
+					tableCells++
+				}
+			}
+
 			entry := stackEntry{tag: tagName}
 			switch tagName {
 			case "b":
+				entry.bold = true
+			case "th":
 				entry.bold = true
 			case "i":
 				entry.italic = true
@@ -237,6 +290,10 @@ func ParseHTMLWithIndent(input string, startIndent int) HTMLResult {
 				i = i + next
 			}
 			decoded := html.UnescapeString(chunk)
+			if tableBreakPending && strings.TrimSpace(decoded) != "" {
+				ensureLineBreak()
+				tableBreakPending = false
+			}
 			textBuf.WriteString(decoded)
 			segBuf.WriteString(decoded)
 		}
