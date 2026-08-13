@@ -18,6 +18,10 @@ const (
 //     writing prompt in-game, so it must reach the server in place.
 //   - Blocks longer than batchThreshold are additionally chunked every
 //     batchChunk lines. At or below the threshold the block stays whole.
+//   - Input that is empty or a single blank line yields no batches at all: a file
+//     with no content is treated as empty rather than as one blank line to send.
+//     Deliberate blank lines inside or at the end of real content are preserved
+//     ("text\n\n" keeps its trailing blank line).
 //
 // Input is CRLF-normalized and a single trailing line terminator is dropped, so
 // a file ending "text\n" does not produce a spurious empty final batch. A file

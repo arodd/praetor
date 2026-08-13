@@ -14,6 +14,7 @@ func TestSplitSendBatches(t *testing.T) {
 		want []string
 	}{
 		{"empty", "", nil},
+		{"lone blank line is not content", "\n", nil},
 		{"single line", "look", []string{"look"}},
 		{"crlf normalized", "one\r\ntwo", []string{"one\ntwo"}},
 		{"trailing newline ignored", "one\ntwo\n", []string{"one\ntwo"}},
