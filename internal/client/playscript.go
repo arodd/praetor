@@ -57,6 +57,12 @@ const commentSigil = '#'
 // script in one pass instead of discovering faults one performance at a time.
 // Steps are returned even when errors exist; callers must refuse to play unless
 // the error slice is empty.
+//
+// Input that is empty or a single blank line yields no steps at all: a file
+// with no content is treated as empty rather than as one blank line to send,
+// matching the ruling for /send in SplitSendBatches (sendblock.go). Deliberate
+// blank lines inside or after real content are preserved and sent — see
+// StepText above.
 func ParsePlayScript(text string) ([]PlayStep, []ParseError) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.TrimSuffix(text, "\n")
@@ -121,7 +127,10 @@ func parseInstruction(body string, line int) (PlayStep, *ParseError) {
 		return PlayStep{Kind: StepWaitRandom, Line: line, Dur: min, DurMax: max}, nil
 
 	case "wait-for":
-		pattern, timeout := splitWaitForTimeout(arg)
+		pattern, timeout, err := splitWaitForTimeout(arg)
+		if err != nil {
+			return fail("%%wait-for: %v", err)
+		}
 		if strings.TrimSpace(pattern) == "" {
 			return fail("%%wait-for needs a pattern to wait for")
 		}
@@ -143,20 +152,28 @@ func parseInstruction(body string, line int) (PlayStep, *ParseError) {
 }
 
 // splitWaitForTimeout separates an optional trailing timeout from a wait-for
-// pattern. The final colon-delimited field is only taken as a timeout when it
-// actually parses as a positive duration, so a pattern containing colons
-// ("He says: run!") needs no escaping. The one thing this cannot express is a
+// pattern. A final field that PARSES as a duration is always meant as a
+// timeout, so a non-positive one is a script error rather than pattern text —
+// otherwise a typo'd "0s" silently becomes an unmatchable pattern. A final
+// field that does not parse as a duration is ordinary pattern text, so
+// "He says: run!" needs no escaping. The one thing this cannot express is a
 // pattern genuinely ending in something duration-shaped; matching is substring
 // based, so the author shortens the pattern instead.
-func splitWaitForTimeout(arg string) (pattern string, timeout time.Duration) {
+func splitWaitForTimeout(arg string) (pattern string, timeout time.Duration, err error) {
 	idx := strings.LastIndex(arg, ":")
 	if idx < 0 {
-		return arg, 0
+		return arg, 0, nil
 	}
-	if d, err := parsePositiveDuration(arg[idx+1:]); err == nil {
-		return arg[:idx], d
+	field := strings.TrimSpace(arg[idx+1:])
+	d, perr := time.ParseDuration(field)
+	if perr != nil {
+		// Not duration-shaped at all: part of the pattern, not a timeout.
+		return arg, 0, nil
 	}
-	return arg, 0
+	if d <= 0 {
+		return arg[:idx], 0, fmt.Errorf("timeout %s must be greater than zero", d)
+	}
+	return arg[:idx], d, nil
 }
 
 // parsePositiveDuration accepts Go duration syntax ("500ms", "5s", "2m") and

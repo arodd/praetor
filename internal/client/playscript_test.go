@@ -60,6 +60,46 @@ func TestParsePlayScript_ColonsInPattern(t *testing.T) {
 	}
 }
 
+// A trailing field that PARSES as a duration is always a timeout, so a
+// non-positive one is a script error rather than silently becoming part of
+// the pattern (which would produce an unmatchable pattern and a quiet hang).
+func TestParsePlayScript_WaitForNonPositiveTimeout(t *testing.T) {
+	for _, in := range []string{"%wait-for:x:0s\n", "%wait-for:x:-5s\n"} {
+		_, errs := ParsePlayScript(in)
+		if len(errs) != 1 {
+			t.Fatalf("input %q: got %d errors, want 1: %v", in, len(errs), errs)
+		}
+		if errs[0].Line != 1 {
+			t.Errorf("input %q: error line = %d, want 1", in, errs[0].Line)
+		}
+		if errs[0].Msg == "" {
+			t.Errorf("input %q: error message is empty", in)
+		}
+	}
+}
+
+// Guard against over-correcting TestParsePlayScript_WaitForNonPositiveTimeout:
+// a trailing field that does NOT parse as a duration is still ordinary
+// pattern text, and a trailing field that parses as a POSITIVE duration is
+// still accepted as a timeout.
+func TestParsePlayScript_WaitForTimeoutStillWorks(t *testing.T) {
+	steps, errs := ParsePlayScript("%wait-for:He says: run!\n")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if steps[0].Text != "He says: run!" || steps[0].Dur != 0 {
+		t.Fatalf("got %+v, want pattern %q with no timeout", steps[0], "He says: run!")
+	}
+
+	steps, errs = ParsePlayScript("%wait-for:the bell tolls:5s\n")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if steps[0].Text != "the bell tolls" || steps[0].Dur != 5*time.Second {
+		t.Fatalf("got %+v, want pattern %q with Dur 5s", steps[0], "the bell tolls")
+	}
+}
+
 func TestParsePlayScript_NoteKeepsColons(t *testing.T) {
 	steps, _ := ParsePlayScript("%note:cue: he draws\n")
 	if steps[0].Text != "cue: he draws" {
@@ -103,7 +143,7 @@ func TestParsePlayScript_ReportsAllErrors(t *testing.T) {
 }
 
 func TestParsePlayScript_NoSendableContent(t *testing.T) {
-	for _, in := range []string{"", "# just a comment\n", "\n\n"} {
+	for _, in := range []string{"", "# just a comment\n", "\n", "\n\n"} {
 		steps, errs := ParsePlayScript(in)
 		if in == "\n\n" {
 			// Blank lines ARE sendable — they terminate in-game prompts.
@@ -112,8 +152,10 @@ func TestParsePlayScript_NoSendableContent(t *testing.T) {
 			}
 			continue
 		}
-		if len(steps) != 0 {
-			t.Errorf("input %q produced %d steps, want 0", in, len(steps))
+		// A single trailing newline is treated as empty input, not as one blank
+		// line to send — matching the ruling for /send in SplitSendBatches.
+		if len(steps) != 0 || len(errs) != 0 {
+			t.Errorf("input %q produced %d steps, %d errors, want 0, 0", in, len(steps), len(errs))
 		}
 	}
 }
