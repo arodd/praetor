@@ -281,3 +281,17 @@ export interface SendPreview {
   lines: number;
   batches: number;
 }
+
+export interface PlayError {
+  line: number;
+  message: string;
+}
+
+export interface PlayPreview {
+  path: string;
+  name: string;
+  steps: number;
+  fixedMs: number;
+  hasCues: boolean;
+  errors: PlayError[] | null;
+}

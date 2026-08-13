@@ -15,6 +15,7 @@
   import PersistentDataModal from "./modals/PersistentDataModal.svelte";
   import NotesModal from "./modals/NotesModal.svelte";
   import SendFileModal from "./modals/SendFileModal.svelte";
+  import PlayScriptModal from "./modals/PlayScriptModal.svelte";
   import HelpModal from "./modals/HelpModal.svelte";
   import ModeSelectModal from "./modals/ModeSelectModal.svelte";
   import QuickCycleModal from "./modals/QuickCycleModal.svelte";
@@ -112,4 +113,6 @@
   <NotesModal />
 {:else if m === "sendfile"}
   <SendFileModal />
+{:else if m === "playscript"}
+  <PlayScriptModal />
 {/if}

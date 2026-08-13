@@ -137,6 +137,8 @@
         e.preventDefault();
         api.abortSend().catch((err) => store.addToast("Abort failed", String(err)));
         api.setMode("disable", []).catch((err) => store.addToast("Mode error", String(err)));
+        api.stopPlay().catch((err) => store.addToast("Stop failed", String(err)));
+        store.playActive = false;
       } else if (e.code === "KeyI") {
         e.preventDefault();
         store.expandAllSuppressed = !store.expandAllSuppressed;

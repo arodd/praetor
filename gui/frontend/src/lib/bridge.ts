@@ -19,6 +19,7 @@ import type {
   NoteSummary,
   Note,
   SendPreview,
+  PlayPreview,
 } from "./types";
 
 function app(): Record<string, (...a: any[]) => Promise<any>> | undefined {
@@ -159,6 +160,16 @@ export const pickSendFile = () =>
   call<SendPreview>("PickSendFile", { path: "", name: "", lines: 0, batches: 0 });
 export const startFileSend = (path: string) => call<void>("StartFileSend", undefined, path);
 export const abortSend = () => call<boolean>("AbortSend", false);
+
+// ---- Play ----
+export const pickPlayFile = () =>
+  call<PlayPreview>("PickPlayFile", { path: "", name: "", steps: 0, fixedMs: 0, hasCues: false, errors: [] });
+export const startPlay = (path: string) => call<void>("StartPlay", undefined, path);
+export const pausePlay = () => call<boolean>("PausePlay", false);
+export const resumePlay = () => call<boolean>("ResumePlay", false);
+export const stopPlay = () => call<boolean>("StopPlay", false);
+export const nextPlayStep = () => call<boolean>("NextPlayStep", false);
+export const playActive = () => call<boolean>("PlayActive", false);
 
 // ---- Events ----
 export function onEvents(cb: (batch: WireEvent[]) => void): () => void {

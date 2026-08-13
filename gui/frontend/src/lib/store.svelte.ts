@@ -8,6 +8,7 @@ import type {
   BarsPayload,
   ConnPayload,
   CustomTabConfig,
+  PlayPreview,
   Segment,
   SendPreview,
   StatusPayload,
@@ -156,6 +157,10 @@ class AppStore {
   notesBackRequest = $state(0);
   // File chosen by /send, awaiting confirmation in SendFileModal.
   sendPreview = $state<SendPreview | null>(null);
+  // Script chosen by /play, awaiting confirmation in PlayScriptModal.
+  playPreview = $state<PlayPreview | null>(null);
+  // True while a performance is running or paused: gates the input lockout.
+  playActive = $state(false);
   // Scrollback search (Ctrl+F). The open flag lives here so GameView's
   // capture-phase key routing, the OutputPane search bar, and Escape handling
   // all agree; the query itself is local to OutputPane.

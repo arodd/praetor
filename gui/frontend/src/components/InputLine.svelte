@@ -6,6 +6,7 @@
   import { searchBackward, dropLastChar } from "../lib/histsearch";
   import { parseNotesCommand, formatNotesList } from "../lib/notescmd";
   import { insertsNewline, caretOnFirstLine, caretOnLastLine } from "../lib/multiline";
+  import { isAllowedDuringPlay } from "../lib/playcmd";
 
   let value = $state("");
   let inputEl: HTMLTextAreaElement;
@@ -104,6 +105,54 @@
     const line = value;
     const trimmed = line.trim();
     const lower = trimmed.toLowerCase();
+
+    // Ask the backend rather than trusting a cached flag: a performance can end
+    // on its own (script finished, send failed), and a stale "playing" flag
+    // would lock the user out of their own input with no way back.
+    const playing = await api.playActive();
+    store.playActive = playing; // keep the UI hint in sync as a side effect
+    if (playing && !isAllowedDuringPlay(line)) {
+      store.addToast("Performance running", "Only /pause, /resume, /stop, /next (or Alt+X) are accepted.");
+      pushHistory(line);
+      return;
+    }
+    if (lower === "/pause") {
+      pushHistory(line);
+      if (!(await api.pausePlay())) store.addToast("Play", "Nothing is playing.");
+      return;
+    }
+    if (lower === "/resume") {
+      pushHistory(line);
+      if (!(await api.resumePlay())) store.addToast("Play", "Nothing is paused.");
+      return;
+    }
+    if (lower === "/stop") {
+      pushHistory(line);
+      store.playActive = false;
+      if (!(await api.stopPlay())) store.addToast("Play", "Nothing is playing.");
+      return;
+    }
+    if (lower === "/next") {
+      pushHistory(line);
+      await api.nextPlayStep();
+      return;
+    }
+    if (lower === "/play") {
+      pushHistory(line);
+      if (store.connState !== "connected") {
+        store.addToast("Play", "Not connected — nothing was played.");
+        return;
+      }
+      try {
+        const preview = await api.pickPlayFile();
+        if (!preview.path) return; // picker cancelled
+        store.playPreview = preview;
+        store.openModal = "playscript";
+      } catch (e) {
+        store.addToast("Play", String(e));
+      }
+      return;
+    }
 
     // Local commands handled by the UI (mirrors the TUI wrapper).
     if (lower === "/help") {
