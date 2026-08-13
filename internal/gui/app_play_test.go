@@ -809,6 +809,56 @@ func TestNote_PrintsInSkotosOrangeAndIsNotSentToGame(t *testing.T) {
 	}
 }
 
+// The game enforces a minimum gap between commands, so the send floor is
+// measured from the last SEND, never from the last step. Two consequences the
+// script author relies on, both pinned here with real timing:
+//
+//   - command, %note, command — the note cannot shrink the gap below
+//     min_interval. The note's own beat counts toward that floor rather than
+//     stacking on top of it.
+//   - %wait:1s, %note, command — an explicit wait that already exceeds the
+//     floor adds nothing further. The author's timing wins.
+func TestSendFloor_IsMeasuredFromTheLastSendNotTheLastStep(t *testing.T) {
+	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
+
+	stamps := make(chan time.Time, 8)
+	a.playSend = func(string) error { stamps <- time.Now(); return nil }
+	// Deliberately NOT stubbing playAfter: this test is about real elapsed time.
+
+	floor := a.cfg().Commands.MinInterval.Duration
+	if floor != 500*time.Millisecond {
+		t.Fatalf("test assumes the 500ms default min_interval, got %s", floor)
+	}
+
+	if err := a.StartPlay(writeScript(t,
+		"one\n%note:absorbed by the floor\ntwo\n%wait:1s\n%note:after an explicit wait\nthree\n")); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+
+	at := make([]time.Time, 0, 3)
+	for len(at) < 3 {
+		select {
+		case ts := <-stamps:
+			at = append(at, ts)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of 3 commands were dispatched", len(at))
+		}
+	}
+
+	// one -> two: only a note between them, so the floor governs. If the note's
+	// beat were ever made additive, this would jump to roughly 1s.
+	if gap := at[1].Sub(at[0]); gap < 400*time.Millisecond || gap > 900*time.Millisecond {
+		t.Errorf("command->note->command gap = %s, want ~%s (the min_interval floor)", gap, floor)
+	}
+
+	// two -> three: %wait:1s plus the note's 500ms beat, and no floor on top
+	// because the gap already exceeds it. ~1.5s, not ~2s.
+	if gap := at[2].Sub(at[1]); gap < 1350*time.Millisecond || gap > 1950*time.Millisecond {
+		t.Errorf("wait+note gap = %s, want ~1.5s (1s wait + 500ms note beat, no extra floor)", gap)
+	}
+}
+
 // A %note holds a beat rather than passing instantly: without one, a scripted
 // scene reads as though its waits were being ignored.
 func TestNote_HoldsABeat(t *testing.T) {
