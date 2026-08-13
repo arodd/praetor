@@ -50,6 +50,11 @@ export function matchCommands(
   // A pasted multi-line block whose first line starts with "/" is prose, not a
   // command — it goes to the game verbatim, so hinting at it would mislead.
   if (input.includes("\n") || input.includes("\r")) return [];
+
+  // InputLine trims the line before dispatch, so the matcher has to see what
+  // dispatch sees — otherwise leading whitespace hides the hint on a command
+  // that Enter would still run.
+  input = input.trimStart();
   if (!input.startsWith("/")) return [];
 
   const pool = opts?.playing
@@ -62,9 +67,13 @@ export function matchCommands(
 
   // Past the first space the command is committed: show only an exact match, so
   // the signature stays up while the arguments are typed and a typo shows
-  // nothing rather than a stale list.
+  // nothing rather than a stale list. A command that takes no arguments is
+  // dispatched on exact equality, so trailing text means it is no longer that
+  // command — "/play foo" is not /play, it falls through and is silently
+  // discarded. Showing its signature would promise something the input will
+  // not do.
   if (spaceAt !== -1) {
-    return pool.filter((c) => namesOf(c).some((n) => n === token));
+    return pool.filter((c) => c.args !== undefined && namesOf(c).some((n) => n === token));
   }
   return pool.filter((c) => namesOf(c).some((n) => n.startsWith(token)));
 }
