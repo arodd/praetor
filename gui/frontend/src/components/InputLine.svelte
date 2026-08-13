@@ -5,9 +5,10 @@
   import { resolveModeName } from "../lib/modes";
   import { searchBackward, dropLastChar } from "../lib/histsearch";
   import { parseNotesCommand, formatNotesList } from "../lib/notescmd";
+  import { insertsNewline, caretOnFirstLine, caretOnLastLine } from "../lib/multiline";
 
   let value = $state("");
-  let inputEl: HTMLInputElement;
+  let inputEl: HTMLTextAreaElement;
   let history: string[] = [];
   let histIdx = $state(-1); // -1 = current (not navigating)
 
@@ -265,17 +266,22 @@
     // first press still submits. Numpad movement repeat is handled separately in
     // GameView (hold-to-walk, intentional).
     if (e.key === "Enter" && e.repeat) return;
+    // Enter with any modifier inserts a line instead of sending. Return without
+    // preventDefault so the textarea performs the insertion itself.
+    if (insertsNewline(e)) return;
     if (store.histSearchActive && rsKeydown(e)) return;
     if (e.key === "Enter") {
       e.preventDefault();
       submit();
     } else if (e.key === "ArrowUp") {
+      if (!caretOnFirstLine(value, inputEl.selectionStart)) return;
       if (history.length === 0) return;
       e.preventDefault();
       if (histIdx === -1) histIdx = history.length - 1;
       else if (histIdx > 0) histIdx--;
       value = history[histIdx] ?? "";
     } else if (e.key === "ArrowDown") {
+      if (!caretOnLastLine(value, inputEl.selectionEnd)) return;
       if (histIdx === -1) return;
       e.preventDefault();
       if (histIdx < history.length - 1) {
@@ -287,6 +293,20 @@
       }
     }
   }
+
+  // Grow the textarea with its content up to a cap, then scroll — Orchil caps at
+  // 105px (resizeInput, orchil.js:1366). Height must be reset before measuring,
+  // or scrollHeight only ever ratchets upward.
+  const INPUT_MAX_PX = 105;
+  function autosize() {
+    if (!inputEl) return;
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, INPUT_MAX_PX) + "px";
+  }
+  $effect(() => {
+    void value;
+    queueMicrotask(autosize);
+  });
 
   // Keep focus on the input whenever no modal is open.
   $effect(() => {
@@ -386,8 +406,8 @@
   {/if}
   <div class="inputbar">
     <span class="prompt">›</span>
-    <input
-      type="text"
+    <textarea
+      rows="1"
       bind:this={inputEl}
       bind:value
       onkeydown={onKeydown}
@@ -400,7 +420,7 @@
       spellcheck={store.config?.UI?.InputSpellcheck ?? true}
       autocomplete="off"
       placeholder={store.connState === "connected" ? "" : "(disconnected)"}
-    />
+    ></textarea>
     <button
       class="mode"
       class:active={!!store.mode && store.mode !== "disable"}
@@ -452,12 +472,16 @@
     font-family: var(--mono);
     font-size: 15px;
   }
-  input {
+  textarea {
     flex: 1;
     font-family: var(--mono);
     font-size: 14px;
     background: var(--bg-input);
     border: 1px solid var(--border);
+    resize: none;
+    overflow-y: auto;
+    font-family: inherit;
+    line-height: 1.4;
   }
   .mode {
     font-size: 12px;
