@@ -320,12 +320,15 @@ func (a *GuiApp) RemoveAccount(username string) error {
 // Input & modes
 // ---------------------------------------------------------------------------
 
-// Send routes a line of user input to the client (game command or /slash).
 // Send handles one submission from the command input. A block containing
 // newlines (paste or modifier+Enter) goes out whole via SendBlock; a single line
 // keeps the existing path, which also interprets slash commands.
 func (a *GuiApp) Send(input string) {
-	if strings.ContainsAny(input, "\n\r") {
+	// Route on the input minus any trailing line terminators: a single command
+	// pasted with a trailing newline ("/mode aggro\n") is still single-line
+	// input and must keep reaching SendCommand, which interprets slash commands.
+	// Only an interior newline means the user is really sending a block.
+	if strings.ContainsAny(strings.TrimRight(input, "\r\n"), "\n\r") {
 		if err := a.client().SendBlock(input); err != nil {
 			a.emit([]WireEvent{{Kind: KindNotify, Notify: &NotifyPayload{
 				Title: "Send failed", Message: err.Error(),
@@ -333,7 +336,7 @@ func (a *GuiApp) Send(input string) {
 		}
 		return
 	}
-	a.client().SendCommand(input)
+	a.client().SendCommand(strings.TrimRight(input, "\r\n"))
 }
 
 // ModeNames returns the available Lua mode names.

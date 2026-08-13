@@ -1,0 +1,152 @@
+package gui
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cyber-godzilla/praetor/internal/client"
+	"github.com/cyber-godzilla/praetor/internal/config"
+	"github.com/cyber-godzilla/praetor/internal/session"
+	"github.com/gorilla/websocket"
+)
+
+var sendRoutingUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+// newSendRoutingServer upgrades exactly one client connection and records
+// every non-ident text frame it receives onto a buffered channel, mirroring
+// internal/client's newRecordingServer (unexported there, so duplicated here
+// for the gui package's own routing tests).
+func newSendRoutingServer(t *testing.T) (*httptest.Server, string, <-chan string) {
+	t.Helper()
+	received := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := sendRoutingUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			text := strings.TrimRight(string(msg), "\r\n")
+			if strings.HasPrefix(text, "SKOTOS ") {
+				continue // ident frame, not a game command
+			}
+			received <- text
+		}
+	}))
+	return srv, "ws" + strings.TrimPrefix(srv.URL, "http"), received
+}
+
+// newSendRoutingApp builds a GuiApp wired to a real *client.Client connected
+// to a recording test server, so Send's routing decision (SendCommand vs
+// SendBlock) can be observed via what actually reaches the wire — and, for
+// slash commands, via CurrentMode(), since /mode never touches the network.
+func newSendRoutingApp(t *testing.T) (*GuiApp, <-chan string) {
+	t.Helper()
+	srv, wsURL, recv := newSendRoutingServer(t)
+	t.Cleanup(srv.Close)
+
+	c, err := client.NewClient(config.Defaults(), nil, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(c.Engine.Close)
+
+	c.Session = session.New()
+	if err := c.Session.Connect(wsURL, nil); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	deps := &Deps{
+		Config:  config.Defaults(),
+		Client:  c,
+		Version: "0.2.0",
+	}
+	a := NewGuiApp(deps, &captureEmitter{})
+	return a, recv
+}
+
+// TestSend_TrailingNewlineStillRoutesSlashCommand covers the fix-round-1
+// finding: a single command pasted with a trailing newline ("/mode aggro\n",
+// common when copying from a document) must still be treated as single-line
+// input and interpreted as a slash command, not shipped to SendBlock as
+// literal prose.
+func TestSend_TrailingNewlineStillRoutesSlashCommand(t *testing.T) {
+	a, recv := newSendRoutingApp(t)
+
+	a.Send("/mode aggro\n")
+
+	if got := a.CurrentMode(); got != "aggro" {
+		t.Fatalf("CurrentMode() = %q, want %q — trailing newline should not have routed to SendBlock", got, "aggro")
+	}
+	select {
+	case msg := <-recv:
+		t.Fatalf("server received %q — /mode must be handled locally, never sent over the wire", msg)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestSend_PlainSlashCommandRoutesAsCommand is the baseline: a slash command
+// with no trailing newline at all must keep working exactly as before.
+func TestSend_PlainSlashCommandRoutesAsCommand(t *testing.T) {
+	a, recv := newSendRoutingApp(t)
+
+	a.Send("/mode aggro")
+
+	if got := a.CurrentMode(); got != "aggro" {
+		t.Fatalf("CurrentMode() = %q, want %q", got, "aggro")
+	}
+	select {
+	case msg := <-recv:
+		t.Fatalf("server received %q — /mode must be handled locally, never sent over the wire", msg)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestSend_InteriorNewlineRoutesAsBlock covers real multi-line input: an
+// interior newline means the user is sending a block, which must go out as
+// ONE message with the newline embedded (never split, never interpreted).
+func TestSend_InteriorNewlineRoutesAsBlock(t *testing.T) {
+	a, recv := newSendRoutingApp(t)
+
+	a.Send("line one\nline two")
+
+	select {
+	case msg := <-recv:
+		want := "line one\nline two"
+		if msg != want {
+			t.Fatalf("server received %q, want %q", msg, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server never received the block")
+	}
+	if got := a.CurrentMode(); got == "line" {
+		t.Fatalf("CurrentMode() = %q — block input must not be interpreted as a command", got)
+	}
+}
+
+// TestSend_InteriorNewlinePlusTrailingNewlineStillRoutesAsBlock checks that
+// trimming only strips trailing terminators before the routing decision: an
+// interior newline surviving that trim still means "block", even when the
+// input also happens to end with one.
+func TestSend_InteriorNewlinePlusTrailingNewlineStillRoutesAsBlock(t *testing.T) {
+	a, recv := newSendRoutingApp(t)
+
+	a.Send("line one\nline two\n")
+
+	select {
+	case msg := <-recv:
+		want := "line one\nline two"
+		if msg != want {
+			t.Fatalf("server received %q, want %q", msg, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server never received the block")
+	}
+}
