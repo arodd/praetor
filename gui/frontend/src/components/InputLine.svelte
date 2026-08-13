@@ -8,11 +8,17 @@
   import { insertsNewline, caretOnFirstLine, caretOnLastLine } from "../lib/multiline";
   import { isAllowedDuringPlay } from "../lib/playcmd";
   import type { PlayState } from "../lib/types";
+  import CommandHint from "./CommandHint.svelte";
+  import { matchCommands } from "../lib/commands";
 
   let value = $state("");
   let inputEl: HTMLTextAreaElement;
   let history: string[] = [];
   let histIdx = $state(-1); // -1 = current (not navigating)
+
+  // Passive hint above the input. matchCommands returns [] for anything that is
+  // not a slash command, so this is empty for ordinary game text.
+  const hintMatches = $derived(matchCommands(value, { playing: store.playActive }));
 
   // Reverse history search (Ctrl+R), readline-style. Active state is mirrored
   // in store.histSearchActive so GameView's Escape routing can yield to it;
@@ -533,6 +539,8 @@
       <span>(history search) “{rsQuery}”{rsFailed ? " — no match" : ""}</span>
       <span class="hint">Enter sends · Esc cancels · Ctrl+R older</span>
     </div>
+  {:else if hintMatches.length > 0 && !store.openModal}
+    <CommandHint matches={hintMatches} />
   {/if}
   <div class="inputbar">
     <span class="prompt">›</span>
