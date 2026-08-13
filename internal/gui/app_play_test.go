@@ -2,11 +2,19 @@ package gui
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cyber-godzilla/praetor/internal/client"
+	"github.com/cyber-godzilla/praetor/internal/engine"
+	"github.com/cyber-godzilla/praetor/internal/session"
+	"github.com/gorilla/websocket"
 )
 
 // playTestApp returns an app whose sends are captured and whose waits complete
@@ -37,6 +45,110 @@ func writeScript(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+var playTestUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+// newConnectedTestSession spins up a local WebSocket server and returns a real
+// session.Session already Connect()-ed to it. This exists so playPreflight's
+// !IsConnected() branch can be exercised through the ACTUAL Session type
+// (session.New() alone would already report disconnected, which only covers
+// the nil/never-dialed case, not "was dialed and IsConnected() says so").
+func newConnectedTestSession(t *testing.T) *session.Session {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := playTestUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Keep the connection open (reading and discarding client frames, e.g.
+		// the ident line and pings) until the test tears it down.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	s := session.New()
+	t.Cleanup(s.Close)
+	if err := s.Connect(wsURL, nil); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	return s
+}
+
+// The nil-client test above only exercises playPreflight's outermost
+// nil-safety short-circuit. These three tests drive the REAL function (no
+// playCheck stub) through its two substantive refusal branches plus the
+// idle-mode pass-through, so a future refactor that inverts or drops either
+// condition breaks a test instead of shipping silently.
+
+func TestPlayPreflight_DisconnectedSessionRefuses(t *testing.T) {
+	a := newTestApp(t)
+	// A real, never-Connect()-ed Session: IsConnected() is false for it, the
+	// same state production sees before login.
+	a.deps.Client = &client.Client{Session: session.New()}
+
+	err := a.playPreflight()
+	if err == nil {
+		t.Fatal("playPreflight returned nil for a disconnected session — want an error")
+	}
+	if !strings.Contains(err.Error(), "not connected") {
+		t.Errorf("error = %q, want it to mention being disconnected (so a reword can't silently swap this with the mode refusal)", err.Error())
+	}
+}
+
+func TestPlayPreflight_ActiveModeRefusesAndNamesIt(t *testing.T) {
+	sess := newConnectedTestSession(t)
+
+	eng, err := engine.NewEngine(nil, nil, "")
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	t.Cleanup(eng.Close)
+	eng.SetMode("attack", nil)
+
+	a := newTestApp(t)
+	a.deps.Client = &client.Client{Session: sess, Engine: eng}
+
+	err = a.playPreflight()
+	if err == nil {
+		t.Fatal("playPreflight returned nil while a non-idle mode is running — want an error")
+	}
+	if !strings.Contains(err.Error(), "attack") {
+		t.Errorf("error = %q, want it to name the active mode %q", err.Error(), "attack")
+	}
+}
+
+func TestPlayPreflight_IdleModesAreAccepted(t *testing.T) {
+	for _, idle := range []string{"", "disable"} {
+		t.Run(fmt.Sprintf("mode=%q", idle), func(t *testing.T) {
+			sess := newConnectedTestSession(t)
+
+			eng, err := engine.NewEngine(nil, nil, "")
+			if err != nil {
+				t.Fatalf("NewEngine: %v", err)
+			}
+			t.Cleanup(eng.Close)
+			if idle != "" {
+				eng.SetMode(idle, nil)
+			}
+			if got := eng.CurrentMode(); got != idle {
+				t.Fatalf("CurrentMode() = %q, want %q", got, idle)
+			}
+
+			a := newTestApp(t)
+			a.deps.Client = &client.Client{Session: sess, Engine: eng}
+
+			if err := a.playPreflight(); err != nil {
+				t.Errorf("playPreflight() = %v, want nil for idle mode %q", err, idle)
+			}
+		})
+	}
 }
 
 func TestStartPlay_SendsTextInOrderAndSkipsNotesAndComments(t *testing.T) {
