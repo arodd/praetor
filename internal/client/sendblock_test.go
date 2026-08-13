@@ -1,12 +1,46 @@
 package client
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cyber-godzilla/praetor/internal/types"
+	"github.com/gorilla/websocket"
 )
+
+// newVerbatimRecordingServer is like newRecordingServer, but it does NOT
+// strings.TrimRight the received frame. newRecordingServer (and the gui
+// package's newSendRoutingServer) both trim "\r\n" off every frame before
+// recording it, which makes them structurally unable to distinguish "a" from
+// "a\n" — exactly the bug class this test guards against, so a trimming
+// recorder cannot be used to catch it.
+func newVerbatimRecordingServer(t *testing.T) (*httptest.Server, string, <-chan string) {
+	t.Helper()
+	received := make(chan string, 16)
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			text := string(msg)
+			if strings.HasPrefix(text, "SKOTOS ") {
+				continue // ident frame, not a game command
+			}
+			received <- text
+		}
+	}))
+	return srv, "ws" + strings.TrimPrefix(srv.URL, "http"), received
+}
 
 func TestSplitSendBatches(t *testing.T) {
 	line := func(n int) string { return strings.TrimSuffix(strings.Repeat("word\n", n), "\n") }
@@ -128,6 +162,75 @@ func TestSendBlock_SendsOneMessageWithEmbeddedNewlines(t *testing.T) {
 	case extra := <-recv:
 		t.Fatalf("block was split — server got a second message %q", extra)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestSendBlock_TrailingBlankLineTerminatorIsTransmitted is the critical
+// regression test for the final-review finding: SplitSendBatches deliberately
+// ends a batch ON its blank line and keeps that blank as the batch's last
+// line, because a blank line is what terminates a writing prompt in-game. If
+// SendBlock strips that trailing newline (as it used to, via TrimSuffix), the
+// terminator never reaches the server and the in-game prompt stays open,
+// swallowing the next batch's first line.
+//
+// This must use a verbatim (untrimmed) recorder: both newRecordingServer here
+// and newSendRoutingServer in internal/gui apply strings.TrimRight(msg,
+// "\r\n") to the received frame, which makes "a" and "a\n" indistinguishable
+// on arrival — exactly the distinction this bug turns on.
+func TestSendBlock_TrailingBlankLineTerminatorIsTransmitted(t *testing.T) {
+	srv, wsURL, recv := newVerbatimRecordingServer(t)
+	defer srv.Close()
+
+	c := newDiscTestClient(t)
+	defer c.Engine.Close()
+	connectTestSession(t, c, wsURL)
+
+	// This is exactly what SplitSendBatches produces for the batch ending a
+	// blank-line boundary: the blank line kept as the batch's last line.
+	batch := "first line\nsecond line\n"
+	if err := c.SendBlock(batch); err != nil {
+		t.Fatalf("SendBlock: %v", err)
+	}
+
+	select {
+	case got := <-recv:
+		// session.Send always appends "\r\n" on top of whatever SendBlock hands
+		// it, so the wire form is the block plus that fixed suffix. The blank
+		// line survives as an embedded "\n" right before the final "\r\n".
+		want := "first line\nsecond line\n\r\n"
+		if got != want {
+			t.Fatalf("server received %q, want %q — the blank-line batch terminator was stripped", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server never received the block")
+	}
+}
+
+// TestSendBlock_NoSpuriousBlankLineForOrdinaryBlock is the companion check:
+// an ordinary block with no deliberate trailing blank line must not gain one.
+// SendBlock no longer trims a trailing newline itself, so this only holds
+// because SplitSendBatches (and callers building blocks by hand) don't leave
+// one unless they mean it.
+func TestSendBlock_NoSpuriousBlankLineForOrdinaryBlock(t *testing.T) {
+	srv, wsURL, recv := newVerbatimRecordingServer(t)
+	defer srv.Close()
+
+	c := newDiscTestClient(t)
+	defer c.Engine.Close()
+	connectTestSession(t, c, wsURL)
+
+	if err := c.SendBlock("first line\nsecond line"); err != nil {
+		t.Fatalf("SendBlock: %v", err)
+	}
+
+	select {
+	case got := <-recv:
+		want := "first line\nsecond line\r\n"
+		if got != want {
+			t.Fatalf("server received %q, want %q", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server never received the block")
 	}
 }
 

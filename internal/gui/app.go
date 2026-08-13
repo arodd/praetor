@@ -335,15 +335,22 @@ func (a *GuiApp) Send(input string) {
 	// pasted with a trailing newline ("/mode aggro\n") is still single-line
 	// input and must keep reaching SendCommand, which interprets slash commands.
 	// Only an interior newline means the user is really sending a block.
-	if strings.ContainsAny(strings.TrimRight(input, "\r\n"), "\n\r") {
-		if err := a.client().SendBlock(input); err != nil {
+	trimmed := strings.TrimRight(input, "\r\n")
+	if strings.ContainsAny(trimmed, "\n\r") {
+		// Pass the trimmed value, not the raw input: SendBlock no longer strips a
+		// trailing newline itself (a /send batch's deliberate trailing blank line
+		// must survive), so a paste's incidental trailing newline would otherwise
+		// go out as an extra blank line here. /send's own batches bypass Send
+		// entirely (they call SendBlock directly from sendBatch), so that path
+		// keeps its trailing blank intact.
+		if err := a.client().SendBlock(trimmed); err != nil {
 			a.emit([]WireEvent{{Kind: KindNotify, Notify: &NotifyPayload{
 				Title: "Send failed", Message: err.Error(),
 			}}})
 		}
 		return
 	}
-	a.client().SendCommand(strings.TrimRight(input, "\r\n"))
+	a.client().SendCommand(trimmed)
 }
 
 // ModeNames returns the available Lua mode names.

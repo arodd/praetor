@@ -280,8 +280,14 @@
     if (e.isComposing || e.keyCode === 229) return;
     // Held Enter must not auto-fire repeated (blank/duplicate) submissions; the
     // first press still submits. Numpad movement repeat is handled separately in
-    // GameView (hold-to-walk, intentional).
-    if (e.key === "Enter" && e.repeat) return;
+    // GameView (hold-to-walk, intentional). preventDefault is required here: on
+    // a <textarea>, Enter's default action inserts a newline, so without it a
+    // held Enter would fill the input with blank lines and silently turn the
+    // next typed command into a multi-line block send.
+    if (e.key === "Enter" && e.repeat) {
+      e.preventDefault();
+      return;
+    }
     // Enter with any modifier inserts a line instead of sending. Return without
     // preventDefault so the textarea performs the insertion itself.
     if (insertsNewline(e)) return;
@@ -490,7 +496,6 @@
   }
   textarea {
     flex: 1;
-    font-family: var(--mono);
     font-size: 14px;
     background: var(--bg-input);
     border: 1px solid var(--border);

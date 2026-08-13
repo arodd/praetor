@@ -71,11 +71,19 @@ func SplitSendBatches(text string) []string {
 // instead would change the framing players' scripts and the game's prompts rely
 // on, so do not "improve" this into a loop.
 //
+// SendBlock only CRLF-normalizes; it does NOT trim a trailing newline. The
+// caller owns trailing-newline policy. In particular, SplitSendBatches
+// deliberately ends a batch ON a blank line and keeps that blank line as the
+// batch's last line, because a blank line often terminates a writing prompt
+// in-game — SendBlock must transmit it, not strip it. Callers that want to
+// drop an incidental trailing newline (e.g. typed/pasted single input) must
+// trim it themselves before calling SendBlock.
+//
 // Slash commands are deliberately not interpreted here: a multi-line block is
 // prose, so a line beginning "/" is text, not a client command. Single-line
 // input still routes through SendCommand.
 func (c *Client) SendBlock(text string) error {
-	block := strings.TrimSuffix(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	block := strings.ReplaceAll(text, "\r\n", "\n")
 
 	log.Printf("[SEND:BLOCK] %d line(s)", strings.Count(block, "\n")+1)
 	if err := c.session().Send(block); err != nil {

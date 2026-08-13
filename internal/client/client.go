@@ -215,7 +215,7 @@ func (c *Client) Run() {
 				if !ok {
 					return
 				}
-				c.emit(types.ModeChangeEvent{NewMode: mc.NewMode, PrevMode: mc.PrevMode})
+				c.emitOrStop(types.ModeChangeEvent{NewMode: mc.NewMode, PrevMode: mc.PrevMode}, done)
 				c.emitStatusUpdate()
 			case <-done:
 				return

@@ -18,7 +18,7 @@
   }
 </script>
 
-<Modal title="Send File" back onsave={send}>
+<Modal title="Send File" onsave={send}>
   {#if p}
     <p>
       <strong>{p.name}</strong> — {p.lines} line{p.lines === 1 ? "" : "s"},

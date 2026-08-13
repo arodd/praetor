@@ -43,6 +43,34 @@ func newSendRoutingServer(t *testing.T) (*httptest.Server, string, <-chan string
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http"), received
 }
 
+// newVerbatimSendRoutingServer is like newSendRoutingServer but records the
+// frame WITHOUT trimming "\r\n" — needed to tell "look\r\n" apart from
+// "look\n\r\n", which newSendRoutingServer's TrimRight would collapse into the
+// same string.
+func newVerbatimSendRoutingServer(t *testing.T) (*httptest.Server, string, <-chan string) {
+	t.Helper()
+	received := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := sendRoutingUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			text := string(msg)
+			if strings.HasPrefix(text, "SKOTOS ") {
+				continue // ident frame, not a game command
+			}
+			received <- text
+		}
+	}))
+	return srv, "ws" + strings.TrimPrefix(srv.URL, "http"), received
+}
+
 // newSendRoutingApp builds a GuiApp wired to a real *client.Client connected
 // to a recording test server, so Send's routing decision (SendCommand vs
 // SendBlock) can be observed via what actually reaches the wire — and, for
@@ -70,6 +98,56 @@ func newSendRoutingApp(t *testing.T) (*GuiApp, <-chan string) {
 	}
 	a := NewGuiApp(deps, &captureEmitter{})
 	return a, recv
+}
+
+// newVerbatimSendRoutingApp is newSendRoutingApp wired to the verbatim
+// recorder, for tests that must distinguish a trailing newline on the wire.
+func newVerbatimSendRoutingApp(t *testing.T) (*GuiApp, <-chan string) {
+	t.Helper()
+	srv, wsURL, recv := newVerbatimSendRoutingServer(t)
+	t.Cleanup(srv.Close)
+
+	c, err := client.NewClient(config.Defaults(), nil, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(c.Engine.Close)
+
+	c.Session = session.New()
+	if err := c.Session.Connect(wsURL, nil); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	deps := &Deps{
+		Config:  config.Defaults(),
+		Client:  c,
+		Version: "0.2.0",
+	}
+	a := NewGuiApp(deps, &captureEmitter{})
+	return a, recv
+}
+
+// TestSend_PlainCommandTrailingNewlineDoesNotLeak covers the assertion the
+// final review asked for: a plain (non-slash) single-line command typed or
+// pasted with a trailing newline, e.g. "look\n", must not leak that newline
+// into what is sent — it must reach the wire as exactly "look\r\n", not
+// "look\n\r\n". Send() already trims trailing "\r\n" before handing the value
+// to SendCommand; this pins that behavior with a recorder that can actually
+// tell the two apart (newSendRoutingServer's TrimRight cannot).
+func TestSend_PlainCommandTrailingNewlineDoesNotLeak(t *testing.T) {
+	a, recv := newVerbatimSendRoutingApp(t)
+
+	a.Send("look\n")
+
+	select {
+	case msg := <-recv:
+		want := "look\r\n"
+		if msg != want {
+			t.Fatalf("server received %q, want %q — trailing newline leaked into the sent command", msg, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server never received the command")
+	}
 }
 
 // TestSend_TrailingNewlineStillRoutesSlashCommand covers the fix-round-1
