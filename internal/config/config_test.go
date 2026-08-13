@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestValidate_DropsEmptyHighlightPattern(t *testing.T) {
@@ -792,5 +793,25 @@ func TestLoadConfig_SpellcheckAndUpdatesExplicitOff(t *testing.T) {
 	}
 	if got.Updates.Check {
 		t.Error("updates.check: false should be honored")
+	}
+}
+
+func TestDefaults_PlayWaitForTimeout(t *testing.T) {
+	if got := Defaults().Play.WaitForTimeout.Duration; got != 60*time.Second {
+		t.Errorf("default Play.WaitForTimeout = %s, want 1m0s", got)
+	}
+}
+
+func TestLoad_PlayWaitForTimeoutOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("play:\n  wait_for_timeout: 90s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Play.WaitForTimeout.Duration != 90*time.Second {
+		t.Errorf("Play.WaitForTimeout = %s, want 1m30s", cfg.Play.WaitForTimeout.Duration)
 	}
 }

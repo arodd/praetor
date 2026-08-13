@@ -49,11 +49,20 @@ type Config struct {
 	Notifications NotificationsConfig `yaml:"notifications"`
 	Logging       LoggingConfig       `yaml:"logging"`
 	Updates       UpdatesConfig       `yaml:"updates"`
+	Play          PlayConfig          `yaml:"play"`
 }
 
 // UpdatesConfig controls the GUI's startup check against GitHub releases.
 type UpdatesConfig struct {
 	Check bool `yaml:"check"` // notify when a newer release exists
+}
+
+// PlayConfig controls /play, the dramatic-presentation player.
+type PlayConfig struct {
+	// WaitForTimeout bounds every %wait-for that does not carry its own
+	// override. Unbounded cue-waiting would strand the performer, since input is
+	// locked down during playback.
+	WaitForTimeout Duration `yaml:"wait_for_timeout"`
 }
 
 type ServerConfig struct {
@@ -318,6 +327,9 @@ func Defaults() *Config {
 		},
 		Updates: UpdatesConfig{
 			Check: true,
+		},
+		Play: PlayConfig{
+			WaitForTimeout: Duration{60 * time.Second},
 		},
 	}
 }
