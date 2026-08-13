@@ -9,6 +9,7 @@ import (
 type fakeDialogs struct {
 	ret  string
 	err  error
+	file string
 	seen struct {
 		title, defaultDir string
 	}
@@ -18,6 +19,12 @@ func (f *fakeDialogs) PickDirectory(title, defaultDir string) (string, error) {
 	f.seen.title = title
 	f.seen.defaultDir = defaultDir
 	return f.ret, f.err
+}
+
+func (f *fakeDialogs) PickFile(title, defaultDir string) (string, error) {
+	f.seen.title = title
+	f.seen.defaultDir = defaultDir
+	return f.file, f.err
 }
 
 func TestPickScriptDir_ReturnsChosenPath(t *testing.T) {

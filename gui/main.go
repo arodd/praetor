@@ -71,6 +71,14 @@ func (d *wailsDialogs) PickDirectory(title, defaultDir string) (string, error) {
 	})
 }
 
+func (d *wailsDialogs) PickFile(title, defaultDir string) (string, error) {
+	// A cancelled dialog returns ("", nil), which the facade treats as no choice.
+	return wailsruntime.OpenFileDialog(d.ctx, wailsruntime.OpenDialogOptions{
+		Title:            title,
+		DefaultDirectory: defaultDir,
+	})
+}
+
 func (c *wailsClipboard) SetText(text string) error {
 	return wailsruntime.ClipboardSetText(c.ctx, text)
 }

@@ -8,6 +8,10 @@ type Dialogs interface {
 	// PickDirectory opens a native folder picker and returns the chosen absolute
 	// path, or "" if the user cancelled.
 	PickDirectory(title, defaultDir string) (string, error)
+
+	// PickFile opens a native file picker and returns the chosen absolute path,
+	// or "" if the user cancelled.
+	PickFile(title, defaultDir string) (string, error)
 }
 
 // PickScriptDir opens a native folder picker for adding a scripts directory and

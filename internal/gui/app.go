@@ -30,6 +30,13 @@ type GuiApp struct {
 	// initialKudosQueue snapshots the queued-kudos count at startup, used for
 	// the one-time login prompt without racing the live config.
 	initialKudosQueue int
+
+	// sendMu guards the in-flight /send driver. sendCancel is non-nil exactly
+	// while a send is running; closing it stops the driver before its next batch.
+	sendMu     sync.Mutex
+	sendCancel chan struct{}
+	// sendOne overrides batch dispatch in tests; nil means send for real.
+	sendOne func(string) error
 }
 
 // NewGuiApp constructs the facade around bootstrapped Deps and an Emitter.
