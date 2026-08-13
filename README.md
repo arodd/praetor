@@ -207,6 +207,12 @@ Praetor loads Lua scripts from configurable directories. Scripts can automate ga
 
 See [docs/lua-api.md](docs/lua-api.md) for the complete Lua API reference.
 
+## Play Scripts
+
+`/play` (GUI) performs a script file into the game — timed beats, waits for another player's cue, and manual holds — for staged scenes like a herald's announcement.
+
+See [docs/play-scripts.md](docs/play-scripts.md) for the complete play script reference.
+
 ## Scripts
 
 Community scripts are available at [praetor-scripts](https://github.com/cyber-godzilla/praetor-scripts).

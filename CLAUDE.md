@@ -204,7 +204,7 @@ The desktop GUI adds bindings the TUI does not have:
 |-----|--------|
 | Ctrl+F | Scrollback search bar (Enter = older match, Shift+Enter = newer, Esc closes) |
 | Ctrl+R | Reverse history search, readline-style (type to filter, Ctrl+R = older match, Enter sends, Esc cancels, arrows/Home/End accept into the input) |
-| Alt+X | Abort: cancels an in-flight /send and switches to the `disable` mode |
+| Alt+X | Abort: cancels an in-flight /send, switches to the `disable` mode, and stops an active `/play` performance |
 | Alt+I | Toggle reveal of suppressed (ignored) lines |
 
 Search matches are tinted in the output and the current match line is outlined.
@@ -258,6 +258,18 @@ A freeform notepad, GUI-only (the terminal client does not wire this up). Each n
 - `/notes delete <title>` — delete a note by title
 - `/notes list` — print `Title — preview…` lines into the output pane, most-recent first
 - Esc menu → Tools & References → **Notes** — opens the same modal
+
+## Play Scripts
+
+`/play` (GUI-only) performs a script file into the game: timed pauses, waits for another player's cue, and manual holds, for staged scenes. Scripts use `%` as the instruction sigil, deliberately not `@` — the game already owns `@` (`@mail`, `@request`, `@macro`, ...), so lines starting with `@` reach the game untouched, and only `%` lines (`%wait`, `%wait-random`, `%wait-for`, `%wait-key`, `%note`) are intercepted by the player. `#` marks a comment (dropped entirely); everything else is sent as-is, including blank lines.
+
+- `/play` — pick a script, preview step count/estimate/errors, then start it
+- `/pause` / `/resume` — hold and continue; `/resume` re-runs the interrupted instruction from the start
+- `/stop` — end the performance and discard its state
+- `/next` — release a `%wait-key` hold
+- Alt+X also stops an active performance (see Key Bindings below)
+
+While playing, only `/pause`, `/resume`, `/stop`, `/next` (and Alt+X) are accepted — everything else is rejected and never reaches the game. Configured via `play.wait_for_timeout` (default `60s`), the ceiling for a `%wait-for` that doesn't specify its own. See [docs/play-scripts.md](docs/play-scripts.md) for the complete script-language reference.
 
 ## Multi-line Input
 
