@@ -573,3 +573,36 @@ func TestStartPlay_ProceedsWhenPreflightPasses(t *testing.T) {
 		t.Fatal("nothing was sent after a passing pre-flight")
 	}
 }
+
+// TestStartPlay_SlashLineReachesGameNotLocalCommand is the fix-round-1
+// regression test: a play-script line beginning "/" is ordinary StepText to
+// the parser (it has no % sigil), and must reach the game VERBATIM, exactly
+// like a line starting with "@". Before this fix, playDispatch's default path
+// called client.SendCommand, which intercepts any leading "/" as a local
+// command — "/mode aggro" fired a real mode switch mid-performance instead of
+// reaching the game, and any other "/"-prefixed line was silently swallowed.
+// This uses the real client/session/engine (via newSendRoutingApp, the same
+// recording-WebSocket harness /send's routing tests use) specifically because
+// the bug lived in real dispatch plumbing that playTestApp's playSend stub
+// bypasses entirely.
+func TestStartPlay_SlashLineReachesGameNotLocalCommand(t *testing.T) {
+	a, recv := newSendRoutingApp(t)
+
+	path := writeScript(t, "/mode aggro\n")
+	if err := a.StartPlay(path); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+
+	select {
+	case msg := <-recv:
+		if msg != "/mode aggro" {
+			t.Fatalf("server received %q, want %q — script line must reach the game verbatim", msg, "/mode aggro")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server never received the script line — /mode must not be handled locally by a play script")
+	}
+
+	if got := a.CurrentMode(); got == "aggro" {
+		t.Fatalf("CurrentMode() = %q — a play-script line must never fire a client command like /mode", got)
+	}
+}

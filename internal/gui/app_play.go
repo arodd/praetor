@@ -413,8 +413,10 @@ func (a *GuiApp) playDispatch(line string) error {
 	if a.playSend != nil {
 		return a.playSend(line)
 	}
-	a.client().SendCommand(line)
-	return nil
+	// Script lines are prose, not client commands: SendBlock deliberately does
+	// not interpret a leading "/", so a script can never fire /mode or /stop at
+	// the client instead of reaching the game.
+	return a.client().SendBlock(line)
 }
 
 func (a *GuiApp) playTimer(d time.Duration) <-chan time.Time {

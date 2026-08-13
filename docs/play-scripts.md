@@ -9,11 +9,11 @@
 - One instruction or one line of game text per line.
 - A line whose **first character** is `%` is an instruction (see below).
 - A line whose **first character** is `#` is a comment: it is dropped entirely — never sent, never shown, not even counted as a step.
-- Everything else is sent to the game verbatim, exactly as if you'd typed it and pressed Enter.
+- Everything else is sent to the game verbatim — including a line starting with `/` (see below).
 - The sigil check is column-1 only. Indenting a comment or instruction (`  # note` or `  %wait:1s`) defeats it — the line falls through to "ordinary game text" and is sent (leading whitespace and all). Keep `%` and `#` flush against the left margin.
 - Blank lines are **sent**, not skipped. In TEC, an empty line ends an in-game writing prompt (composing `@mail`, for instance), so a script that stages a prompt needs those blank terminators to actually reach the server. A blank line in the middle of a script, or right after your last line of content, is preserved.
 - An empty file, or a file that's just a single blank line, is treated as having nothing to play (no steps at all) — it's not sent as one blank line. A trailing blank line at the very end of the file is trimmed the same way; blank lines anywhere else are kept.
-- A line starting with `/` gets no special treatment from the parser — it's stored as ordinary game text, same as any other non-`%`, non-`#` line. There's a wrinkle at send time, though: Praetor treats **any** line starting with `/` as a local client command, exactly like typed input. A recognized one (`/mode`, `/toggle`, `/set`, `/wiki`, `/maps`, `/calc`) fires that command instead of reaching the game; anything else is silently dropped. If a script genuinely needs to send text that starts with `/`, put a single space in front of it (`" /who"`) — the parser keeps leading whitespace verbatim, and a line that doesn't start with `/` goes straight to the game.
+- A line starting with `/` is not interpreted as a client command. It's ordinary game text, same as any other non-`%`, non-`#` line, and reaches the game exactly as written. `%` is the only escape — a script can never accidentally fire `/mode` or `/stop` at the client instead of the game.
 
 ## Why `%` and Not `@`
 
