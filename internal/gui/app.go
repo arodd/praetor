@@ -47,6 +47,8 @@ type GuiApp struct {
 	playSend  func(string) error
 	playAfter func(time.Duration) <-chan time.Time
 	playRand  func(min, max time.Duration) time.Duration
+	// playCheck overrides the pre-flight guard in tests; nil means the real check.
+	playCheck func() error
 }
 
 // NewGuiApp constructs the facade around bootstrapped Deps and an Emitter.

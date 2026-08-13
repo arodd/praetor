@@ -41,6 +41,8 @@ type playSession struct {
 
 	text    chan string // game text for %wait-for; buffered, never blocks the event loop
 	matcher *engine.Matcher
+
+	lastSend time.Time // guarded by the driver goroutine, which is its only user
 }
 
 // PickPlayFile opens the picker, parses the chosen script, and returns a
@@ -76,9 +78,34 @@ func (a *GuiApp) PickPlayFile() (PlayPreview, error) {
 	return p, nil
 }
 
+// playPreflight refuses a performance that cannot run cleanly. It is nil-safe
+// throughout: a missing client is treated as disconnected rather than panicking,
+// which matters because this runs on the caller's goroutine and a panic here
+// would surface as a dead binding rather than a message.
+func (a *GuiApp) playPreflight() error {
+	if a.playCheck != nil {
+		return a.playCheck()
+	}
+	c := a.client()
+	if c == nil || c.Session == nil || !c.Session.IsConnected() {
+		return fmt.Errorf("not connected — nothing was played")
+	}
+	if c.Engine != nil {
+		if mode := c.Engine.CurrentMode(); mode != "" && mode != "disable" {
+			return fmt.Errorf(
+				"mode %q is running — its queued commands would interleave with the performance; press Alt+X first",
+				mode)
+		}
+	}
+	return nil
+}
+
 // StartPlay parses path and begins performing it. It refuses an invalid script
 // outright: validation exists so faults surface before anything is sent.
 func (a *GuiApp) StartPlay(path string) error {
+	if err := a.playPreflight(); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -245,10 +272,20 @@ func (a *GuiApp) waitWhilePaused(s *playSession) bool {
 func (a *GuiApp) runPlayStep(s *playSession, step client.PlayStep) (completed, stopped bool) {
 	switch step.Kind {
 	case client.StepText:
+		if gap := time.Since(s.lastSend); !s.lastSend.IsZero() {
+			// Commands.MinInterval is config.Duration, a YAML wrapper — the real
+			// time.Duration is its .Duration field.
+			if floor := a.cfg().Commands.MinInterval.Duration; gap < floor {
+				if done, stopped := a.playSleep(s, floor-gap); !done {
+					return done, stopped
+				}
+			}
+		}
 		if err := a.playDispatch(step.Text); err != nil {
 			a.notify("Performance failed", fmt.Sprintf("line %d: %v", step.Line, err))
 			return false, true
 		}
+		s.lastSend = time.Now()
 		return true, false
 
 	case client.StepNote:

@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -21,6 +22,11 @@ func playTestApp(t *testing.T) (*GuiApp, chan string) {
 		return ch
 	}
 	a.playRand = func(min, max time.Duration) time.Duration { return min }
+	// Tests in this package build GuiApp via newTestApp, which leaves deps.Client
+	// nil, so the real pre-flight would refuse every performance as disconnected.
+	// Default the seam to "pass" here; tests that specifically want to exercise
+	// the pre-flight override it themselves.
+	a.playCheck = func() error { return nil }
 	return a, sent
 }
 
@@ -60,6 +66,7 @@ func TestStartPlay_SendsTextInOrderAndSkipsNotesAndComments(t *testing.T) {
 
 func TestPausePlay_HoldsAndResumeReRunsTheInstruction(t *testing.T) {
 	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
 	sent := make(chan string, 8)
 	a.playSend = func(s string) error { sent <- s; return nil }
 	a.playRand = func(min, max time.Duration) time.Duration { return min }
@@ -182,6 +189,7 @@ func TestStartPlay_RefusesInvalidScript(t *testing.T) {
 // PlayActive could report false while the driver kept right on sending.
 func TestStopPlay_HaltsBetweenConsecutiveTextSteps(t *testing.T) {
 	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
 	sent := make(chan string, 8)
 	proceed := make(chan struct{})
 	a.playSend = func(s string) error {
@@ -227,6 +235,7 @@ func TestStopPlay_HaltsBetweenConsecutiveTextSteps(t *testing.T) {
 // hold without the performer actually confirming it.
 func TestNextPlayStep_EarlyCallDoesNotSkipWaitKey(t *testing.T) {
 	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
 	sent := make(chan string, 8)
 	proceed := make(chan struct{})
 	a.playSend = func(s string) error {
@@ -284,6 +293,7 @@ func TestNextPlayStep_EarlyCallDoesNotSkipWaitKey(t *testing.T) {
 // requesting a second timer for the same step.
 func TestPausePlay_StaleTokenDoesNotRestartALaterWait(t *testing.T) {
 	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
 	sent := make(chan string, 8)
 	proceed := make(chan struct{})
 	a.playSend = func(s string) error {
@@ -356,6 +366,7 @@ func TestPickPlayFile_ReportsPreviewAndErrors(t *testing.T) {
 
 func TestWaitFor_ProceedsOnMatchingText(t *testing.T) {
 	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
 	sent := make(chan string, 8)
 	a.playSend = func(s string) error { sent <- s; return nil }
 	// playTestApp's default playAfter fires instantly, which is correct for
@@ -409,5 +420,44 @@ func TestWaitFor_TimeoutHaltsButKeepsState(t *testing.T) {
 	}
 	if !a.ResumePlay() {
 		t.Error("ResumePlay failed after a %wait-for timeout")
+	}
+}
+
+func TestStartPlay_RefusesWhenPreflightFails(t *testing.T) {
+	a, _ := playTestApp(t)
+	a.playCheck = func() error { return fmt.Errorf("not connected — nothing was played") }
+
+	if err := a.StartPlay(writeScript(t, "hello\n")); err == nil {
+		t.Fatal("StartPlay succeeded despite a failing pre-flight check")
+	}
+	if a.PlayActive() {
+		t.Error("PlayActive is true after a refused start")
+	}
+}
+
+// The real pre-flight must be nil-safe: newTestApp leaves deps.Client nil, and a
+// panic here would take down the whole event loop in production too.
+func TestPlayPreflight_NilClientIsTreatedAsDisconnected(t *testing.T) {
+	a := newTestApp(t)
+	err := a.playPreflight()
+	if err == nil {
+		t.Fatal("playPreflight returned nil with no client — want a disconnected error")
+	}
+}
+
+func TestStartPlay_ProceedsWhenPreflightPasses(t *testing.T) {
+	a, sent := playTestApp(t)
+	a.playCheck = func() error { return nil }
+
+	if err := a.StartPlay(writeScript(t, "hello\n")); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+	select {
+	case got := <-sent:
+		if got != "hello" {
+			t.Fatalf("sent %q, want %q", got, "hello")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("nothing was sent after a passing pre-flight")
 	}
 }
