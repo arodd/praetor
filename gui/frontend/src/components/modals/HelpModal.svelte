@@ -1,6 +1,12 @@
 <script lang="ts">
   import Modal from "../Modal.svelte";
   import { COMMANDS, commandHead, type CommandSpec } from "../../lib/commands";
+  import { store } from "../../lib/store.svelte";
+
+  // Match the output pane's text size, which is user-configurable
+  // (ui.output_font_size). Help is a reference you sit and read; a fixed size
+  // ignored the setting and came out smaller than the game text.
+  const fontSize = $derived(store.config?.UI?.OutputFontSize || 14);
 
   const keys: [string, string][] = [
     ["Tab / Shift+Tab", "Next / previous tab"],
@@ -19,8 +25,8 @@
 </script>
 
 <Modal title="Help" wide back>
-  <div class="cols">
-    <div class="col">
+  <div style="font-size:{fontSize}px">
+    <div class="sect">
       <div class="h dim">Key bindings</div>
       <table>
         <tbody>
@@ -30,7 +36,7 @@
         </tbody>
       </table>
     </div>
-    <div class="col">
+    <div class="sect">
       <div class="h dim">Commands</div>
       <table>
         <tbody>
@@ -44,12 +50,16 @@
 </Modal>
 
 <style>
-  .cols {
-    display: flex;
-    gap: 24px;
+  /* The two sections stack rather than sitting side by side. Side by side, each
+     got half of 720px, and a key cell like "/notes [add|open|delete|list]
+     [title]" ate ~300px of that — leaving so little for the description that
+     "Show key bindings and commands" wrapped onto three lines. Full width gives
+     the description column room, at the cost of a taller modal that scrolls. */
+  .sect {
+    margin-bottom: 20px;
   }
-  .col {
-    flex: 1;
+  .sect:last-child {
+    margin-bottom: 0;
   }
   .h {
     font-size: 11px;
@@ -60,7 +70,7 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    /* font-size comes from the wrapper, set inline from ui.output_font_size. */
   }
   td {
     padding: 4px 6px;
@@ -70,6 +80,7 @@
     font-family: var(--mono);
     color: var(--accent);
     white-space: nowrap;
-    padding-right: 12px;
+    padding-right: 16px;
+    width: 1%; /* shrink-to-fit, so the description gets every remaining pixel */
   }
 </style>
