@@ -9,3 +9,6 @@
 .claude/
 # Local review-findings backlog (one task file per finding); not for the public repo.
 /todo/
+# Local design artifacts (specs and implementation plans); working notes, not
+# product documentation. User-facing docs live directly under /docs.
+/docs/superpowers/
