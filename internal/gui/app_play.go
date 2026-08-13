@@ -5,9 +5,11 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cyber-godzilla/praetor/internal/client"
+	"github.com/cyber-godzilla/praetor/internal/engine"
 )
 
 // PlayError is one script validation failure, for the frontend.
@@ -36,6 +38,9 @@ type playSession struct {
 	resume chan struct{} // signalled by /resume
 	next   chan struct{} // signalled by /next
 	paused bool          // guarded by playMu
+
+	text    chan string // game text for %wait-for; buffered, never blocks the event loop
+	matcher *engine.Matcher
 }
 
 // PickPlayFile opens the picker, parses the chosen script, and returns a
@@ -92,11 +97,13 @@ func (a *GuiApp) StartPlay(path string) error {
 		return fmt.Errorf("a performance is already running — /stop it first")
 	}
 	s := &playSession{
-		steps:  steps,
-		cancel: make(chan struct{}),
-		pause:  make(chan struct{}, 1),
-		resume: make(chan struct{}, 1),
-		next:   make(chan struct{}, 1),
+		steps:   steps,
+		cancel:  make(chan struct{}),
+		pause:   make(chan struct{}, 1),
+		resume:  make(chan struct{}, 1),
+		next:    make(chan struct{}, 1),
+		text:    make(chan string, 64),
+		matcher: engine.NewMatcher(),
 	}
 	a.play = s
 	a.playMu.Unlock()
@@ -270,9 +277,75 @@ func (a *GuiApp) runPlayStep(s *playSession, step client.PlayStep) (completed, s
 			return false, true
 		}
 
+	case client.StepWaitFor:
+		return a.playWaitFor(s, step)
+
 	default:
-		// StepWaitFor is added in the next task.
 		return true, false
+	}
+}
+
+// playWaitFor blocks until game text matches the step's pattern, bounded by the
+// step's own timeout or the configured default. Matching is CASE-INSENSITIVE,
+// deliberately diverging from Lua reaction matching: a reaction that misses
+// fires again on the next line, while a missed cue stalls the performance and
+// then halts the scene, so the forgiving behavior is worth the inconsistency.
+func (a *GuiApp) playWaitFor(s *playSession, step client.PlayStep) (completed, stopped bool) {
+	timeout := step.Dur
+	if timeout <= 0 {
+		timeout = a.cfg().Play.WaitForTimeout.Duration
+	}
+	cp := s.matcher.Compile(strings.ToLower(step.Text))
+	deadline := a.playTimer(timeout)
+
+	// Drain text buffered before this step began: a cue that arrived while an
+	// earlier line was being sent has already passed and must not satisfy us.
+	for {
+		select {
+		case <-s.text:
+			continue
+		default:
+		}
+		break
+	}
+
+	for {
+		select {
+		case line := <-s.text:
+			if s.matcher.Match(cp, strings.ToLower(line)) {
+				return true, false
+			}
+		case <-deadline:
+			a.notify("Cue not seen", fmt.Sprintf(
+				"line %d gave up waiting for %q after %s. /resume to keep waiting.",
+				step.Line, step.Text, timeout))
+			// Halt but KEEP state: pause the session in place so /resume re-runs
+			// this same step and re-arms the matcher.
+			a.playMu.Lock()
+			s.paused = true
+			a.playMu.Unlock()
+			return false, false
+		case <-s.pause:
+			return false, false
+		case <-s.cancel:
+			return false, true
+		}
+	}
+}
+
+// feedPlayText hands one line of game text to a waiting %wait-for. It never
+// blocks: the caller is the GUI event loop, and a full buffer means the
+// performance is not currently waiting on a cue.
+func (a *GuiApp) feedPlayText(text string) {
+	a.playMu.Lock()
+	s := a.play
+	a.playMu.Unlock()
+	if s == nil {
+		return
+	}
+	select {
+	case s.text <- text:
+	default:
 	}
 }
 

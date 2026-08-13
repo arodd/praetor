@@ -353,3 +353,61 @@ func TestPickPlayFile_ReportsPreviewAndErrors(t *testing.T) {
 		t.Errorf("FixedMs = %d, want 5000", got.FixedMs)
 	}
 }
+
+func TestWaitFor_ProceedsOnMatchingText(t *testing.T) {
+	a := newTestApp(t)
+	sent := make(chan string, 8)
+	a.playSend = func(s string) error { sent <- s; return nil }
+	// playTestApp's default playAfter fires instantly, which is correct for
+	// %wait/%wait-random (those tests want no real sleeping) but wrong here:
+	// it would time out this %wait-for before the cue could ever arrive, since
+	// the mock ignores the requested duration entirely. Use a deadline that
+	// never fires so only the cue (fed below) can complete the step.
+	a.playAfter = func(time.Duration) <-chan time.Time { return make(chan time.Time) }
+	a.playRand = func(min, max time.Duration) time.Duration { return min }
+	path := writeScript(t, "%wait-for:Aldric draws\nafter the cue\n")
+	if err := a.StartPlay(path); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+
+	select {
+	case s := <-sent:
+		t.Fatalf("sent %q before the cue arrived", s)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Case differs from the pattern on purpose: matching is case-insensitive.
+	a.feedPlayText("ALDRIC DRAWS his blade.")
+
+	select {
+	case got := <-sent:
+		if got != "after the cue" {
+			t.Fatalf("sent %q, want %q", got, "after the cue")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("playback did not continue after the cue")
+	}
+}
+
+func TestWaitFor_TimeoutHaltsButKeepsState(t *testing.T) {
+	a, sent := playTestApp(t)
+	// playAfter fires immediately, so the cue wait times out at once.
+	path := writeScript(t, "%wait-for:never happens\nnever sent\n")
+	if err := a.StartPlay(path); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+
+	select {
+	case s := <-sent:
+		t.Fatalf("sent %q after a timed-out cue — playback must halt", s)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// State is KEPT so a late cue costs a /resume, not the whole scene.
+	if !a.PlayActive() {
+		t.Fatal("PlayActive is false after a %wait-for timeout — state must be kept")
+	}
+	if !a.ResumePlay() {
+		t.Error("ResumePlay failed after a %wait-for timeout")
+	}
+}

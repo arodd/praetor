@@ -144,6 +144,12 @@ func (a *GuiApp) processBatch(batch []types.Event) {
 				a.deps.SessionLog.Log(e.Timestamp, e.Text)
 			}
 			a.deps.DesktopNotify.CheckText(e.Text)
+			// Echoed lines (user-typed or script-sent) must not satisfy a
+			// %wait-for cue: a script waiting on a phrase it just sent itself
+			// would match instantly.
+			if !e.IsEcho {
+				a.feedPlayText(e.Text)
+			}
 
 		case types.SKOOTUpdateEvent:
 			// Side effects.
