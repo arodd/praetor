@@ -132,10 +132,10 @@
       } else if (e.code === "KeyX") {
         // Panic key: stop everything that is running. A /send in flight is
         // aborted and the active script mode is killed — either, or both.
+        // The abort toast comes from the Go driver (it knows how many batches
+        // actually went out), so deliberately none is raised here.
         e.preventDefault();
-        api.abortSend().then((aborted) => {
-          if (aborted) store.addToast("Send aborted", "Remaining batches cancelled.");
-        });
+        api.abortSend().catch((err) => store.addToast("Abort failed", String(err)));
         api.setMode("disable", []).catch((err) => store.addToast("Mode error", String(err)));
       } else if (e.code === "KeyI") {
         e.preventDefault();
