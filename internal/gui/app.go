@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cyber-godzilla/praetor/internal/client"
 	"github.com/cyber-godzilla/praetor/internal/colorwords"
@@ -37,6 +38,15 @@ type GuiApp struct {
 	sendCancel chan struct{}
 	// sendOne overrides batch dispatch in tests; nil means send for real.
 	sendOne func(string) error
+
+	// playMu guards the in-flight /play session. play is non-nil exactly while a
+	// performance is running or paused.
+	playMu sync.Mutex
+	play   *playSession
+	// Test seams; nil means use the real implementation.
+	playSend  func(string) error
+	playAfter func(time.Duration) <-chan time.Time
+	playRand  func(min, max time.Duration) time.Duration
 }
 
 // NewGuiApp constructs the facade around bootstrapped Deps and an Emitter.
