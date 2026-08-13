@@ -17,6 +17,11 @@
   --green: #55cc55; /* TUI colorGreen */
   --red: #cc4444; /* TUI colorRed */
   --blue: #88aaff; /* TUI colorBlue */
+  /* Electric blue — the /play performance indicator. Deliberately NOT the
+     orange accent: a running performance locks the input down, so it must read
+     as a different kind of state than "a mode is active". */
+  --play-blue: #33ccff;
+  --play-blue-dim: #1d7fa3;
   --bar-empty: #333333; /* TUI colorBarEmpty */
 
   /* Lighting label colors (TUI lightingStyle*) */

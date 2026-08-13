@@ -809,6 +809,63 @@ func TestNote_PrintsInSkotosOrangeAndIsNotSentToGame(t *testing.T) {
 	}
 }
 
+// The input-bar indicator needs live progress: a static "performing" chip can't
+// distinguish a long %wait from a wedged client, which is the confusion the
+// indicator exists to end.
+func TestPlayStatus_ReportsStepProgressAndPauseState(t *testing.T) {
+	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
+	a.playSend = func(string) error { return nil }
+	a.playRand = func(min, max time.Duration) time.Duration { return min }
+
+	waits := make(chan chan time.Time, 4)
+	a.playAfter = func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		waits <- ch
+		return ch
+	}
+
+	if st := a.PlayStatus(); st.Active {
+		t.Fatalf("PlayStatus() = %+v with nothing playing, want inactive", st)
+	}
+
+	// The first line sends with no floor (lastSend is zero), so the first timer
+	// request comes from the %wait — parking the driver on a known step.
+	if err := a.StartPlay(writeScript(t, "one\n%wait:30s\ntwo\n")); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+	select {
+	case <-waits:
+	case <-time.After(2 * time.Second):
+		t.Fatal("driver never reached the %wait")
+	}
+
+	st := a.PlayStatus()
+	if !st.Active {
+		t.Error("PlayStatus().Active = false during a performance")
+	}
+	if st.Paused {
+		t.Error("PlayStatus().Paused = true before any /pause")
+	}
+	if st.Step != 2 || st.Total != 3 {
+		t.Errorf("PlayStatus() step %d/%d, want 2/3 (parked on the %%wait)", st.Step, st.Total)
+	}
+
+	if !a.PausePlay() {
+		t.Fatal("PausePlay returned false during a performance")
+	}
+	if st := a.PlayStatus(); !st.Paused || !st.Active {
+		t.Errorf("after /pause PlayStatus() = %+v, want active and paused", st)
+	}
+
+	if !a.StopPlay() {
+		t.Fatal("StopPlay returned false during a performance")
+	}
+	if st := a.PlayStatus(); st.Active {
+		t.Errorf("after /stop PlayStatus() = %+v, want inactive", st)
+	}
+}
+
 // The game enforces a minimum gap between commands, so the send floor is
 // measured from the last SEND, never from the last step. Two consequences the
 // script author relies on, both pinned here with real timing:

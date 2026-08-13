@@ -20,6 +20,7 @@ import type {
   Note,
   SendPreview,
   PlayPreview,
+  PlayState,
 } from "./types";
 
 function app(): Record<string, (...a: any[]) => Promise<any>> | undefined {
@@ -170,6 +171,8 @@ export const resumePlay = () => call<boolean>("ResumePlay", false);
 export const stopPlay = () => call<boolean>("StopPlay", false);
 export const nextPlayStep = () => call<boolean>("NextPlayStep", false);
 export const playActive = () => call<boolean>("PlayActive", false);
+export const playStatus = () =>
+  call<PlayState>("PlayStatus", { active: false, paused: false, step: 0, total: 0 });
 
 // ---- Events ----
 export function onEvents(cb: (batch: WireEvent[]) => void): () => void {

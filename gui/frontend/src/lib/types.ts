@@ -287,6 +287,15 @@ export interface PlayError {
   message: string;
 }
 
+// Live status of a performance, polled while one is running so the input-bar
+// indicator can show progress. Step is 1-based.
+export interface PlayState {
+  active: boolean;
+  paused: boolean;
+  step: number;
+  total: number;
+}
+
 export interface PlayPreview {
   path: string;
   name: string;

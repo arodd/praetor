@@ -7,6 +7,7 @@
   import { parseNotesCommand, formatNotesList } from "../lib/notescmd";
   import { insertsNewline, caretOnFirstLine, caretOnLastLine } from "../lib/multiline";
   import { isAllowedDuringPlay } from "../lib/playcmd";
+  import type { PlayState } from "../lib/types";
 
   let value = $state("");
   let inputEl: HTMLTextAreaElement;
@@ -21,6 +22,40 @@
   let rsFailed = $state(false);
   let rsIndex = 0; // history index of the current match
   let rsSaved = ""; // input contents before the search began (restored on Esc)
+  // Live performance status for the input-bar indicator. Polled only while a
+  // performance is running: a step counter that visibly advances is what tells
+  // the performer a long %wait or cue wait is a deliberate hold rather than a
+  // wedged client — the whole reason this indicator exists.
+  const IDLE_PLAY: PlayState = { active: false, paused: false, step: 0, total: 0 };
+  let play = $state<PlayState>(IDLE_PLAY);
+
+  $effect(() => {
+    if (!store.playActive) {
+      play = IDLE_PLAY;
+      return;
+    }
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const st = await api.playStatus();
+        if (stopped) return;
+        play = st;
+        // The backend is the authority: a performance that ended on its own
+        // clears the flag here, which also tears this poll down.
+        if (!st.active) store.playActive = false;
+      } catch {
+        // A failed status call is not worth a toast mid-scene; the next tick retries.
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 500);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  });
+
   // True while a mouse button is held anywhere in the window — i.e. the user is
   // likely dragging out a text selection. Sticky-focus stands down until release
   // so it can't clear the selection mid-drag.
@@ -492,6 +527,18 @@
       autocomplete="off"
       placeholder={store.connState === "connected" ? "" : "(disconnected)"}
     ></textarea>
+    {#if play.active}
+      <span
+        class="play"
+        class:paused={play.paused}
+        title={play.paused
+          ? "Performance paused — /resume to continue, /stop or Alt+X to end"
+          : "Performance running — only /pause, /resume, /stop, /next (or Alt+X) are accepted"}
+      >
+        {play.paused ? "❙❙" : "▶"}
+        {play.step}/{play.total}
+      </span>
+    {/if}
     <button
       class="mode"
       class:active={!!store.mode && store.mode !== "disable"}
@@ -552,6 +599,24 @@
     overflow-y: auto;
     font-family: inherit;
     line-height: 1.4;
+  }
+  /* Performance indicator. Electric blue rather than the orange accent: while
+     this is showing, the input rejects everything but the four control
+     commands, so it must not read as just another "a mode is active" state. */
+  .play {
+    font-size: 12px;
+    font-family: var(--mono);
+    color: var(--play-blue);
+    background: var(--bg-elevated);
+    border: 1px solid var(--play-blue-dim);
+    border-radius: 4px;
+    padding: 4px 10px;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .play.paused {
+    color: var(--play-blue-dim);
+    border-color: var(--border);
   }
   .mode {
     font-size: 12px;

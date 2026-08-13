@@ -24,6 +24,18 @@ const playNoteBeat = 500 * time.Millisecond
 // would be stripped and the note would render uncolored.
 const noteColor = "#e8a838"
 
+// PlayState is the live status of a performance, for the input-bar indicator.
+// Step is 1-based and advances as the script runs, so the indicator can show
+// progress rather than a static "performing" chip — during a long %wait or a
+// cue wait, a number that moves is the only thing distinguishing a deliberate
+// hold from a wedged client.
+type PlayState struct {
+	Active bool `json:"active"`
+	Paused bool `json:"paused"`
+	Step   int  `json:"step"`
+	Total  int  `json:"total"`
+}
+
 // PlayError is one script validation failure, for the frontend.
 type PlayError struct {
 	Line    int    `json:"line"`
@@ -50,6 +62,7 @@ type playSession struct {
 	resume chan struct{} // signalled by /resume
 	next   chan struct{} // signalled by /next
 	paused bool          // guarded by playMu
+	idx    int           // step currently executing, 0-based; guarded by playMu
 
 	text    chan string // game text for %wait-for; buffered, never blocks the event loop
 	matcher *engine.Matcher
@@ -160,6 +173,22 @@ func (a *GuiApp) StartPlay(path string) error {
 	return nil
 }
 
+// PlayStatus reports the live state of a performance for the input-bar
+// indicator. The zero value (Active false) means nothing is playing.
+func (a *GuiApp) PlayStatus() PlayState {
+	a.playMu.Lock()
+	defer a.playMu.Unlock()
+	if a.play == nil {
+		return PlayState{}
+	}
+	return PlayState{
+		Active: true,
+		Paused: a.play.paused,
+		Step:   a.play.idx + 1, // 1-based for display
+		Total:  len(a.play.steps),
+	}
+}
+
 // PlayActive reports whether a performance is running or paused. Also used by
 // StartFileSend to refuse a /send while a performance is active (the reverse
 // of playPreflight's sendActive check). Takes and releases playMu only — never
@@ -244,6 +273,13 @@ func (a *GuiApp) runPlay(s *playSession) {
 			return
 		default:
 		}
+
+		// Publish the position for PlayStatus before the step runs, so the
+		// indicator names the step actually in progress — including the long
+		// %wait or cue wait the driver is about to park on.
+		a.playMu.Lock()
+		s.idx = idx
+		a.playMu.Unlock()
 
 		if !a.waitWhilePaused(s) {
 			return
