@@ -211,9 +211,14 @@ button:disabled:hover {
   color: var(--fg);
 }
 
+/* textarea is in this list deliberately. Without it the UA draws its own focus
+   ring, and the command input holds focus permanently (sticky focus refocuses
+   it on blur), so that ring is always on screen — it renders as a hard border
+   in whatever colour the GTK theme picks. */
 input[type="text"],
 input[type="password"],
 input[type="number"],
+textarea,
 select {
   font-family: inherit;
   font-size: 13px;
@@ -225,6 +230,7 @@ select {
   caret-color: var(--accent); /* orange terminal caret */
 }
 input:focus,
+textarea:focus,
 select:focus {
   border-color: var(--accent);
 }

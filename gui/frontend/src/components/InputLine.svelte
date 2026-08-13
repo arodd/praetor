@@ -29,26 +29,61 @@
   const IDLE_PLAY: PlayState = { active: false, paused: false, step: 0, total: 0 };
   let play = $state<PlayState>(IDLE_PLAY);
 
+  // refreshPlay pulls the authoritative status once. Called by the poll and
+  // immediately after a control action, so the indicator reflects a /pause or
+  // /resume at once instead of up to a poll interval later.
+  async function refreshPlay() {
+    try {
+      const st = await api.playStatus();
+      play = st;
+      if (!st.active) store.playActive = false;
+    } catch {
+      // A failed status call is not worth a toast mid-scene; the poll retries.
+    }
+  }
+
+  // openPlayPicker is the /play flow, shared by the command and the indicator
+  // button so the two can never drift apart.
+  async function openPlayPicker() {
+    if (store.connState !== "connected") {
+      store.addToast("Play", "Not connected — nothing was played.");
+      return;
+    }
+    try {
+      const preview = await api.pickPlayFile();
+      if (!preview.path) return; // picker cancelled
+      store.playPreview = preview;
+      store.openModal = "playscript";
+    } catch (e) {
+      store.addToast("Play", String(e));
+    }
+  }
+
+  // The indicator doubles as the control: idle starts a script, running pauses,
+  // paused resumes. /stop and Alt+X remain the ways to end a performance — this
+  // button deliberately cannot, so a stray click can never destroy a scene.
+  async function onPlayClick() {
+    if (!play.active) {
+      await openPlayPicker();
+      return;
+    }
+    if (play.paused) await api.resumePlay();
+    else await api.pausePlay();
+    await refreshPlay();
+  }
+
   $effect(() => {
     if (!store.playActive) {
       play = IDLE_PLAY;
       return;
     }
     let stopped = false;
-    const tick = async () => {
-      if (stopped) return;
-      try {
-        const st = await api.playStatus();
-        if (stopped) return;
-        play = st;
-        // The backend is the authority: a performance that ended on its own
-        // clears the flag here, which also tears this poll down.
-        if (!st.active) store.playActive = false;
-      } catch {
-        // A failed status call is not worth a toast mid-scene; the next tick retries.
-      }
+    // The backend is the authority: a performance that ended on its own clears
+    // store.playActive from its answer, which also tears this poll down.
+    const tick = () => {
+      if (!stopped) void refreshPlay();
     };
-    void tick();
+    tick();
     const id = setInterval(tick, 500);
     return () => {
       stopped = true;
@@ -174,18 +209,7 @@
     }
     if (lower === "/play") {
       pushHistory(line);
-      if (store.connState !== "connected") {
-        store.addToast("Play", "Not connected — nothing was played.");
-        return;
-      }
-      try {
-        const preview = await api.pickPlayFile();
-        if (!preview.path) return; // picker cancelled
-        store.playPreview = preview;
-        store.openModal = "playscript";
-      } catch (e) {
-        store.addToast("Play", String(e));
-      }
+      await openPlayPicker();
       return;
     }
 
@@ -527,18 +551,25 @@
       autocomplete="off"
       placeholder={store.connState === "connected" ? "" : "(disconnected)"}
     ></textarea>
-    {#if play.active}
-      <span
-        class="play"
-        class:paused={play.paused}
-        title={play.paused
-          ? "Performance paused — /resume to continue, /stop or Alt+X to end"
-          : "Performance running — only /pause, /resume, /stop, /next (or Alt+X) are accepted"}
-      >
+    <button
+      class="play"
+      class:active={play.active}
+      class:paused={play.paused}
+      title={!play.active
+        ? "Play a script (/play)"
+        : play.paused
+          ? `Paused at step ${play.step} of ${play.total} — click to resume. /stop or Alt+X ends it.`
+          : `Performing step ${play.step} of ${play.total} — click to pause. Only /pause, /resume, /stop, /next (or Alt+X) are accepted.`}
+      onclick={onPlayClick}
+      tabindex="-1"
+    >
+      {#if !play.active}
+        ▶ play
+      {:else}
         {play.paused ? "❙❙" : "▶"}
         {play.step}/{play.total}
-      </span>
-    {/if}
+      {/if}
+    </button>
     <button
       class="mode"
       class:active={!!store.mode && store.mode !== "disable"}
@@ -603,18 +634,30 @@
   /* Performance indicator. Electric blue rather than the orange accent: while
      this is showing, the input rejects everything but the four control
      commands, so it must not read as just another "a mode is active" state. */
+  /* Idle it sits quiet like the mode button; performing it lights electric
+     blue. Deliberately not the orange accent: while it is lit the input
+     rejects everything but the four control commands, so it must read as a
+     different class of state than "a mode is active". */
   .play {
     font-size: 12px;
     font-family: var(--mono);
-    color: var(--play-blue);
+    color: var(--fg-dim);
     background: var(--bg-elevated);
-    border: 1px solid var(--play-blue-dim);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 4px 10px;
     white-space: nowrap;
     user-select: none;
   }
-  .play.paused {
+  .play:hover {
+    border-color: var(--play-blue);
+    color: var(--play-blue);
+  }
+  .play.active {
+    color: var(--play-blue);
+    border-color: var(--play-blue-dim);
+  }
+  .play.active.paused {
     color: var(--play-blue-dim);
     border-color: var(--border);
   }
