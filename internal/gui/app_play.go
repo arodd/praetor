@@ -175,10 +175,35 @@ func (a *GuiApp) runPlay(s *playSession) {
 	defer a.finishPlay(s)
 
 	for idx := 0; idx < len(s.steps); {
-		// Honor a pause requested before this step begins.
+		// Stop is checked EVERY iteration, not only inside waits: a run of plain
+		// text lines would otherwise ignore /stop until the next wait step.
+		// A line already in flight still completes — like a sent command, it
+		// cannot be recalled — but no further step begins.
+		select {
+		case <-s.cancel:
+			return
+		default:
+		}
+
 		if !a.waitWhilePaused(s) {
 			return
 		}
+
+		// Drop pause/next tokens left behind by a step that could not consume
+		// them. `paused` (guarded by playMu) is the source of truth for whether
+		// to hold; these channels exist only to interrupt a step that blocks.
+		// Without this drain, a signal aimed at one step silently satisfies a
+		// later, unrelated one — an early /next skipping a %wait-key, or a stale
+		// /pause making a later %wait restart.
+		select {
+		case <-s.pause:
+		default:
+		}
+		select {
+		case <-s.next:
+		default:
+		}
+
 		done, stopped := a.runPlayStep(s, s.steps[idx])
 		if stopped {
 			return
