@@ -1,6 +1,6 @@
 <script lang="ts">
   import Modal from "../Modal.svelte";
-  import { COMMANDS, type CommandSpec } from "../../lib/commands";
+  import { COMMANDS, commandHead, type CommandSpec } from "../../lib/commands";
 
   const keys: [string, string][] = [
     ["Tab / Shift+Tab", "Next / previous tab"],
@@ -14,9 +14,7 @@
 
   // "/mode (/sm) <name> [args…]" — one row per command, aliases inline.
   function label(c: CommandSpec): string {
-    const names = [c.name, ...(c.aliases ?? [])];
-    const head = names.length > 1 ? `${names[0]} (${names.slice(1).join(", ")})` : names[0];
-    return c.args ? `${head} ${c.args}` : head;
+    return c.args ? `${commandHead(c)} ${c.args}` : commandHead(c);
   }
 </script>
 

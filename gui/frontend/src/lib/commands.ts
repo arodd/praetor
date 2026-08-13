@@ -40,6 +40,14 @@ export const COMMANDS: CommandSpec[] = [
   { name: "/next", desc: "Release a %wait-key hold" },
 ];
 
+// commandHead formats a command's name with its aliases parenthesized —
+// "/mode (/sm)" — the one place CommandHint and HelpModal agree on how a
+// command is named; each still renders its own argument signature.
+export function commandHead(c: CommandSpec): string {
+  const names = [c.name, ...(c.aliases ?? [])];
+  return names.length > 1 ? `${names[0]} (${names.slice(1).join(", ")})` : names[0];
+}
+
 // matchCommands returns the catalog entries to show for the current input.
 // Returns [] whenever the hint should not appear at all, so callers need only
 // check the length.
@@ -52,9 +60,9 @@ export function matchCommands(
   if (input.includes("\n") || input.includes("\r")) return [];
 
   // InputLine trims the line before dispatch, so the matcher has to see what
-  // dispatch sees — otherwise leading whitespace hides the hint on a command
-  // that Enter would still run.
-  input = input.trimStart();
+  // dispatch sees — otherwise whitespace (leading, or trailing on a niladic
+  // command) hides the hint on a command that Enter would still run.
+  input = input.trim();
   if (!input.startsWith("/")) return [];
 
   const pool = opts?.playing

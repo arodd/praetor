@@ -1,18 +1,13 @@
 <script lang="ts">
-  import type { CommandSpec } from "../lib/commands";
+  import { commandHead, type CommandSpec } from "../lib/commands";
 
   let { matches }: { matches: CommandSpec[] } = $props();
-
-  function head(c: CommandSpec): string {
-    const names = [c.name, ...(c.aliases ?? [])];
-    return names.length > 1 ? `${names[0]} (${names.slice(1).join(", ")})` : names[0];
-  }
 </script>
 
 <div class="hint">
   {#each matches as c (c.name)}
     <div class="row">
-      <span class="name">{head(c)}</span>
+      <span class="name">{commandHead(c)}</span>
       {#if c.args}<span class="args">{c.args}</span>{/if}
       <span class="desc">{c.desc}</span>
     </div>
@@ -51,6 +46,7 @@
   }
   .desc {
     color: var(--fg-dim);
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }

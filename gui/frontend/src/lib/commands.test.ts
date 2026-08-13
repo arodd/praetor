@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { COMMANDS, matchCommands } from "./commands";
+import { isAllowedDuringPlay } from "./playcmd";
 
 const names = (r: ReturnType<typeof matchCommands>) => r.map((c) => c.name);
 
@@ -104,7 +105,49 @@ describe("matchCommands", () => {
     expect(names(matchCommands("  /pl"))).toEqual(["/play"]);
   });
 
+  // Same trim, trailing side: a space after a niladic command still dispatches
+  // (InputLine's `line.trim()` strips it before comparing), so the hint must
+  // not disappear the instant the user presses space.
+  it("tolerates trailing whitespace on a niladic command, mirroring InputLine's trim", () => {
+    expect(names(matchCommands("/play "))).toEqual(["/play"]);
+    expect(names(matchCommands("/help "))).toEqual(["/help"]);
+    expect(names(matchCommands(" /play "))).toEqual(["/play"]);
+  });
+
+  // Guard against over-correcting the trailing-whitespace fix: real trailing
+  // text (not just whitespace) on a niladic command is still rejected, and a
+  // command that takes arguments still matches past its trailing space.
+  it("still rejects real trailing text on a niladic command after the trim fix", () => {
+    expect(matchCommands("/play foo")).toEqual([]);
+  });
+  it("still matches a command with arguments through trailing whitespace", () => {
+    expect(names(matchCommands("/mode aggro "))).toEqual(["/mode"]);
+  });
+
   it("still returns nothing for a newline even with the leading-space trim", () => {
     expect(matchCommands("/play\nlook")).toEqual([]);
+  });
+
+  // playcmd.ALLOWED and this catalog's DURING_PLAY both enumerate the same
+  // four control commands independently — nothing else pins them together, so
+  // this proves they still agree in both directions: everything the hint
+  // shows during a performance is accepted by the input lockout, and nothing
+  // else in the catalog is secretly accepted that the hint doesn't show.
+  it("agrees with playcmd's isAllowedDuringPlay on the play-control commands", () => {
+    const shown = matchCommands("/", { playing: true });
+    for (const c of shown) {
+      expect(
+        isAllowedDuringPlay(c.name),
+        `${c.name} is shown during a performance but rejected by isAllowedDuringPlay`,
+      ).toBe(true);
+    }
+
+    const shownNames = shown.map((c) => c.name).sort();
+    const alsoAllowed = COMMANDS.filter((c) => isAllowedDuringPlay(c.name))
+      .map((c) => c.name)
+      .sort();
+    expect(alsoAllowed, "isAllowedDuringPlay accepts a catalog command the hint doesn't show during a performance").toEqual(
+      shownNames,
+    );
   });
 });
