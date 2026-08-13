@@ -1,6 +1,12 @@
 package client
 
-import "strings"
+import (
+	"log"
+	"strings"
+	"time"
+
+	"github.com/cyber-godzilla/praetor/internal/types"
+)
 
 const (
 	// batchThreshold is the line count above which a block is chunked. At or
@@ -57,4 +63,34 @@ func SplitSendBatches(text string) []string {
 	}
 	flush()
 	return batches
+}
+
+// SendBlock sends text to the game as a SINGLE WebSocket message with its
+// newlines embedded, matching the Orchil client (conn.send(message+"\n") at
+// orchil.js:1086) — the server splits the block itself. Sending line-by-line
+// instead would change the framing players' scripts and the game's prompts rely
+// on, so do not "improve" this into a loop.
+//
+// Slash commands are deliberately not interpreted here: a multi-line block is
+// prose, so a line beginning "/" is text, not a client command. Single-line
+// input still routes through SendCommand.
+func (c *Client) SendBlock(text string) error {
+	block := strings.TrimSuffix(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+
+	log.Printf("[SEND:BLOCK] %d line(s)", strings.Count(block, "\n")+1)
+	if err := c.session().Send(block); err != nil {
+		log.Printf("[CLIENT] block send error: %v", err)
+		return err
+	}
+
+	if c.Settings.EchoTyped {
+		for _, ln := range strings.Split(block, "\n") {
+			c.emit(types.GameTextEvent{
+				Styled:    []types.StyledSegment{{Text: ln, Italic: true}},
+				Timestamp: time.Now(),
+				IsEcho:    true,
+			})
+		}
+	}
+	return nil
 }

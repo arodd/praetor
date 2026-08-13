@@ -3,6 +3,9 @@ package client
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cyber-godzilla/praetor/internal/types"
 )
 
 func TestSplitSendBatches(t *testing.T) {
@@ -94,5 +97,65 @@ func TestSplitSendBatches_500LinesWithBlanks(t *testing.T) {
 	}
 	if rejoined != total {
 		t.Errorf("batches hold %d lines total, want %d — lines were lost or duplicated", rejoined, total)
+	}
+}
+
+// Orchil sends a multi-line block as a single message with embedded newlines
+// (orchil.js:1086). Splitting it per line would change what the server sees.
+func TestSendBlock_SendsOneMessageWithEmbeddedNewlines(t *testing.T) {
+	srv, wsURL, recv := newRecordingServer(t)
+	defer srv.Close()
+
+	c := newDiscTestClient(t)
+	defer c.Engine.Close()
+	connectTestSession(t, c, wsURL)
+
+	if err := c.SendBlock("first line\r\nsecond line\r\nthird line"); err != nil {
+		t.Fatalf("SendBlock: %v", err)
+	}
+
+	select {
+	case got := <-recv:
+		want := "first line\nsecond line\nthird line"
+		if got != want {
+			t.Fatalf("server received %q, want %q", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server never received the block")
+	}
+
+	select {
+	case extra := <-recv:
+		t.Fatalf("block was split — server got a second message %q", extra)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestSendBlock_EchoesEachLine(t *testing.T) {
+	srv, wsURL, _ := newRecordingServer(t)
+	defer srv.Close()
+
+	c := newDiscTestClient(t)
+	defer c.Engine.Close()
+	connectTestSession(t, c, wsURL)
+	c.Settings.EchoTyped = true
+
+	if err := c.SendBlock("alpha\nbeta"); err != nil {
+		t.Fatalf("SendBlock: %v", err)
+	}
+
+	var echoed []string
+	for len(echoed) < 2 {
+		select {
+		case ev := <-c.events:
+			if tev, ok := ev.(types.GameTextEvent); ok && tev.IsEcho {
+				echoed = append(echoed, tev.Styled[0].Text)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("got echoes %v, want [alpha beta]", echoed)
+		}
+	}
+	if echoed[0] != "alpha" || echoed[1] != "beta" {
+		t.Fatalf("got echoes %v, want [alpha beta]", echoed)
 	}
 }
