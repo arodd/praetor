@@ -1,6 +1,6 @@
 <script lang="ts">
   import Modal from "../Modal.svelte";
-  import { COMMANDS, commandHead, type CommandSpec } from "../../lib/commands";
+  import { COMMANDS, commandHead } from "../../lib/commands";
   import { store } from "../../lib/store.svelte";
 
   // Match the output pane's text size, which is user-configurable
@@ -18,10 +18,11 @@
     ["Enter (empty)", "Send a blank line"],
   ];
 
-  // "/mode (/sm) <name> [args…]" — one row per command, aliases inline.
-  function label(c: CommandSpec): string {
-    return c.args ? `${commandHead(c)} ${c.args}` : commandHead(c);
-  }
+  // Arguments render on their own indented line below the command rather than
+  // beside it. Inline, the widest signature ("/notes [add|open|delete|list]
+  // [title]") set the key column's width for every row, squeezing the
+  // descriptions — even short ones like /send wrapped. Split out, the column
+  // sizes to the command name alone.
 </script>
 
 <Modal title="Help" wide back>
@@ -41,7 +42,10 @@
       <table>
         <tbody>
           {#each COMMANDS as c (c.name)}
-            <tr><td class="k">{label(c)}</td><td>{c.desc}</td></tr>
+            <tr><td class="k">{commandHead(c)}</td><td>{c.desc}</td></tr>
+            {#if c.args}
+              <tr><td class="args" colspan="2">{c.args}</td></tr>
+            {/if}
           {/each}
         </tbody>
       </table>
@@ -76,11 +80,22 @@
     padding: 4px 6px;
     vertical-align: top;
   }
+  /* A fixed key column, identical in both tables, so the two sections line up
+     as one grid instead of each sizing itself to its own longest cell. 180px
+     clears the widest entry either side ("Tab / Shift+Tab", "/mode (/sm)") with
+     room to spare, and leaves the rest of the 720px modal for descriptions. */
   .k {
     font-family: var(--mono);
     color: var(--accent);
     white-space: nowrap;
     padding-right: 16px;
-    width: 1%; /* shrink-to-fit, so the description gets every remaining pixel */
+    width: 180px;
+  }
+  /* Argument signatures sit on their own line, indented under their command. */
+  .args {
+    font-family: var(--mono);
+    color: var(--fg-dim);
+    padding-left: 24px;
+    padding-top: 0;
   }
 </style>
