@@ -488,6 +488,11 @@ func (c *Config) Validate() error {
 		c.Commands.MaxQueueSize = 20
 	}
 
+	// Play
+	if c.Play.WaitForTimeout.Duration <= 0 {
+		c.Play.WaitForTimeout = Duration{60 * time.Second}
+	}
+
 	// UI
 	validDisplayModes := map[string]bool{"sidebar": true, "topbar": true, "off": true}
 	if !validDisplayModes[c.UI.DisplayMode] {

@@ -815,3 +815,39 @@ func TestLoad_PlayWaitForTimeoutOverride(t *testing.T) {
 		t.Errorf("Play.WaitForTimeout = %s, want 1m30s", cfg.Play.WaitForTimeout.Duration)
 	}
 }
+
+func TestValidate_PlayWaitForTimeoutClamps(t *testing.T) {
+	cases := []struct {
+		name  string
+		value time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -5 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Play.WaitForTimeout = Duration{tc.value}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error: %v", err)
+			}
+			if cfg.Play.WaitForTimeout.Duration != 60*time.Second {
+				t.Errorf("Play.WaitForTimeout = %s, want 1m0s", cfg.Play.WaitForTimeout.Duration)
+			}
+		})
+	}
+}
+
+func TestLoad_PlayWaitForTimeoutZeroClamped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("play:\n  wait_for_timeout: 0s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Play.WaitForTimeout.Duration != 60*time.Second {
+		t.Errorf("Play.WaitForTimeout = %s, want 1m0s (clamped from 0s)", cfg.Play.WaitForTimeout.Duration)
+	}
+}
