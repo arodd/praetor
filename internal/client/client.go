@@ -314,14 +314,20 @@ func (c *Client) SendCommand(input string) {
 	}
 }
 
-// emit delivers an event to the events channel. Lifecycle events (connect,
-// disconnect, mode change) are guaranteed: dropping a DisconnectedEvent under a
-// text flood would leave the UI rendering a live-looking session, so those block
-// until delivered. Bulk events (text, SKOOT, status, command echo) stay
-// droppable — backpressure on a slow UI is intentional there.
+// emit delivers an event to the events channel. Guaranteed events block until
+// delivered: lifecycle events (connect, disconnect, mode change) because a
+// dropped DisconnectedEvent leaves the UI rendering a live-looking session, and
+// game text because it is unique and unrecoverable — dropping it truncates a
+// large server message mid-block and loses the line from the session log too.
+// Blocking here propagates backpressure through the line channel to TCP, which
+// is the correct response to a UI that cannot keep up.
+//
+// Status, SKOOT bar, and command events stay droppable: those are coalescible
+// snapshots where the newest supersedes the old, so a dropped one costs nothing.
 func (c *Client) emit(ev types.Event) {
 	switch ev.(type) {
-	case types.ConnectedEvent, types.DisconnectedEvent, types.ModeChangeEvent:
+	case types.ConnectedEvent, types.DisconnectedEvent, types.ModeChangeEvent,
+		types.GameTextEvent, types.SuppressedGameTextEvent:
 		c.events <- ev
 	default:
 		select {
@@ -329,6 +335,17 @@ func (c *Client) emit(ev types.Event) {
 		default:
 			log.Printf("[CLIENT] event channel full, dropping event %T", ev)
 		}
+	}
+}
+
+// emitOrStop is emit for callers that must stay cancellable while blocked. A
+// guaranteed event (game text echo) would otherwise pin drainLoop inside a
+// channel send where it can no longer observe stop, hanging Run's wg.Wait() at
+// teardown if the consumer has stopped draining.
+func (c *Client) emitOrStop(ev types.Event, stop <-chan struct{}) {
+	select {
+	case c.events <- ev:
+	case <-stop:
 	}
 }
 
@@ -618,14 +635,14 @@ func (c *Client) drainLoop(sess *session.Session, stop <-chan struct{}) {
 
 		// Echo engine commands in the output if script echo is enabled.
 		if c.Settings.EchoScript {
-			c.emit(types.GameTextEvent{
+			c.emitOrStop(types.GameTextEvent{
 				Styled: []types.StyledSegment{{
 					Text:   cmd.Command,
 					Italic: true,
 				}},
 				Timestamp: time.Now(),
 				IsEcho:    true,
-			})
+			}, stop)
 		}
 	}
 }

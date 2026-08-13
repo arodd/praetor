@@ -141,8 +141,12 @@ func TestClient_Emit_GuaranteesDisconnectedUnderFlood(t *testing.T) {
 	c := newDiscTestClient(t)
 
 	// Saturate the events buffer with droppable bulk events, no consumer.
+	// GameTextEvent is excluded here: it moved into the guaranteed (blocking)
+	// class in the large-message-cutoff fix, so flooding with it would just
+	// block this loop instead of saturating the buffer. StatusUpdateEvent
+	// stays droppable (a coalescible snapshot), which is what this test needs.
 	for i := 0; i < 300; i++ {
-		c.emit(types.GameTextEvent{Text: "flood"})
+		c.emit(types.StatusUpdateEvent{Mode: "flood"})
 	}
 
 	sent := make(chan struct{})
