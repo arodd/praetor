@@ -12,6 +12,18 @@ import (
 	"github.com/cyber-godzilla/praetor/internal/engine"
 )
 
+// playNoteBeat is how long a %note holds before the scene moves on. A note is a
+// stage direction the performer has to read mid-scene, so passing through it
+// instantly made scripted scenes look as though their waits were being ignored.
+const playNoteBeat = 500 * time.Millisecond
+
+// noteColor is Skotos orange — the same accent as the GUI's --skotos-orange and
+// the TUI's colorOrange — so a stage note reads as client chrome rather than
+// game text. It must stay a bare hex value: the frontend's safeColor sanitizer
+// fails closed on anything containing "(", so a var(--skotos-orange) reference
+// would be stripped and the note would render uncolored.
+const noteColor = "#e8a838"
+
 // PlayError is one script validation failure, for the frontend.
 type PlayError struct {
 	Line    int    `json:"line"`
@@ -317,10 +329,15 @@ func (a *GuiApp) runPlayStep(s *playSession, step client.PlayStep) (completed, s
 		// mid-scene must stay on screen and in scrollback, not fade after 5s.
 		a.emit([]WireEvent{{Kind: KindText, Text: &TextPayload{
 			Text:      step.Text,
-			Segments:  []Segment{{Text: step.Text, Color: "#8a8a99", Italic: true}},
+			Segments:  []Segment{{Text: step.Text, Color: noteColor, Italic: true}},
 			Timestamp: unixMillis(time.Now()),
 		}}})
-		return true, false
+		// Then hold a beat, interruptibly, so /pause and /stop stay responsive.
+		// The beat runs AFTER the print so the note lands with the line it
+		// annotates rather than at the same instant as the following line. A
+		// pause landing inside the beat re-runs the step and reprints the note —
+		// cosmetic, and the better trade of the two.
+		return a.playSleep(s, playNoteBeat)
 
 	case client.StepWait:
 		return a.playSleep(s, step.Dur)

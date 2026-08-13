@@ -68,7 +68,11 @@ Hold indefinitely until the performer sends `/next`. Takes no argument. Useful f
 
 ### `%note:<text>`
 
-Print `<text>` locally, in the output pane (dim italic), and never send anything to the game. The rest of the line after the first colon is taken verbatim, including any further colons — `%note:done — Aldric usually replies here` is the whole note text, colon and all.
+Print `<text>` locally, in the output pane, and never send anything to the game. The rest of the line after the first colon is taken verbatim, including any further colons — `%note:done — Aldric usually replies here` is the whole note text, colon and all.
+
+A note renders in **Skotos orange italic**, the client's accent colour, so it stands apart from game text at a glance mid-scene.
+
+A note also **holds a half-second beat** before the scene moves on, so you have a moment to read it. That beat is deliberate: a note that passed through instantly made scripts read as though their waits were being skipped.
 
 ```
 %note:check that Aldric is in the room before you begin

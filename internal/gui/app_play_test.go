@@ -758,3 +758,83 @@ func TestStartPlay_SlashLineReachesGameNotLocalCommand(t *testing.T) {
 		t.Fatalf("CurrentMode() = %q — a play-script line must never fire a client command like /mode", got)
 	}
 }
+
+// findNoteSegment polls the capture emitter for a wire text event carrying the
+// given note text, returning its first styled segment.
+func findNoteSegment(t *testing.T, a *GuiApp, want string) Segment {
+	t.Helper()
+	ce, ok := a.emitter.(*captureEmitter)
+	if !ok {
+		t.Fatalf("emitter is %T, want *captureEmitter", a.emitter)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, e := range ce.snapshot() {
+			batch, ok := e.data.([]WireEvent)
+			if !ok {
+				continue
+			}
+			for _, w := range batch {
+				if w.Kind == KindText && w.Text != nil && w.Text.Text == want && len(w.Text.Segments) > 0 {
+					return w.Text.Segments[0]
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no wire text event carrying the note %q ever reached the output pane", want)
+	return Segment{}
+}
+
+// A %note is a stage direction for the performer: it belongs in the output pane
+// in Skotos orange, and must never be transmitted to the game.
+func TestNote_PrintsInSkotosOrangeAndIsNotSentToGame(t *testing.T) {
+	a, sent := playTestApp(t)
+	if err := a.StartPlay(writeScript(t, "%note:Reached the note\n")); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+
+	seg := findNoteSegment(t, a, "Reached the note")
+	if seg.Color != noteColor {
+		t.Errorf("note color = %q, want %q (--skotos-orange)", seg.Color, noteColor)
+	}
+	if !seg.Italic {
+		t.Error("note segment is not italic")
+	}
+
+	select {
+	case s := <-sent:
+		t.Fatalf("note text %q was sent to the game — it must stay local", s)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A %note holds a beat rather than passing instantly: without one, a scripted
+// scene reads as though its waits were being ignored.
+func TestNote_HoldsABeat(t *testing.T) {
+	a := newTestApp(t)
+	a.playCheck = func() error { return nil }
+	a.playSend = func(string) error { return nil }
+	a.playRand = func(min, max time.Duration) time.Duration { return min }
+
+	durs := make(chan time.Duration, 8)
+	a.playAfter = func(d time.Duration) <-chan time.Time {
+		durs <- d
+		ch := make(chan time.Time, 1)
+		ch <- time.Time{}
+		return ch
+	}
+
+	if err := a.StartPlay(writeScript(t, "%note:beat\n")); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+
+	select {
+	case d := <-durs:
+		if d != playNoteBeat {
+			t.Errorf("note beat = %s, want %s", d, playNoteBeat)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("%note completed without holding a beat")
+	}
+}
