@@ -1,8 +1,4 @@
 import { describe, it, expect } from "vitest";
-// @types/node isn't a dependency of this frontend package (it's only an unmet
-// optional peer of vite/vitest), so svelte-check can't resolve node:fs's real
-// types even though vitest runs on Node and provides it at runtime regardless.
-// @ts-expect-error -- no @types/node in this package; see note above.
 import { readFileSync } from "node:fs";
 import { COMMANDS } from "./commands";
 
