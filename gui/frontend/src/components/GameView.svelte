@@ -130,7 +130,12 @@
         e.preventDefault();
         quickCycleMode();
       } else if (e.code === "KeyX") {
+        // Panic key: stop everything that is running. A /send in flight is
+        // aborted and the active script mode is killed — either, or both.
         e.preventDefault();
+        api.abortSend().then((aborted) => {
+          if (aborted) store.addToast("Send aborted", "Remaining batches cancelled.");
+        });
         api.setMode("disable", []).catch((err) => store.addToast("Mode error", String(err)));
       } else if (e.code === "KeyI") {
         e.preventDefault();

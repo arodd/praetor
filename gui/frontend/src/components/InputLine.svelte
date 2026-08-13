@@ -130,6 +130,22 @@
       pushHistory(line);
       return;
     }
+    if (lower === "/send") {
+      pushHistory(line);
+      if (store.connState !== "connected") {
+        store.addToast("Send", "Not connected — nothing was sent.");
+        return;
+      }
+      try {
+        const preview = await api.pickSendFile();
+        if (!preview.path) return; // picker cancelled
+        store.sendPreview = preview;
+        store.openModal = "sendfile";
+      } catch (e) {
+        store.addToast("Send", String(e));
+      }
+      return;
+    }
     if (lower.startsWith("/mode ") || lower.startsWith("/sm ")) {
       const parts = trimmed.split(/\s+/);
       const raw = parts[1];

@@ -9,6 +9,7 @@ import type {
   ConnPayload,
   CustomTabConfig,
   Segment,
+  SendPreview,
   StatusPayload,
   TextPayload,
   SuppressPayload,
@@ -153,6 +154,8 @@ class AppStore {
   notesInitial = $state<NotesInitial | null>(null);
   notesEditorActive = $state(false);
   notesBackRequest = $state(0);
+  // File chosen by /send, awaiting confirmation in SendFileModal.
+  sendPreview = $state<SendPreview | null>(null);
   // Scrollback search (Ctrl+F). The open flag lives here so GameView's
   // capture-phase key routing, the OutputPane search bar, and Escape handling
   // all agree; the query itself is local to OutputPane.

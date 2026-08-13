@@ -14,6 +14,7 @@
   import RBCalcModal from "./modals/RBCalcModal.svelte";
   import PersistentDataModal from "./modals/PersistentDataModal.svelte";
   import NotesModal from "./modals/NotesModal.svelte";
+  import SendFileModal from "./modals/SendFileModal.svelte";
   import HelpModal from "./modals/HelpModal.svelte";
   import ModeSelectModal from "./modals/ModeSelectModal.svelte";
   import QuickCycleModal from "./modals/QuickCycleModal.svelte";
@@ -109,4 +110,6 @@
   <PersistentDataModal />
 {:else if m === "notes"}
   <NotesModal />
+{:else if m === "sendfile"}
+  <SendFileModal />
 {/if}

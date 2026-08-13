@@ -274,3 +274,10 @@ export interface Note {
   title: string;
   body: string;
 }
+
+export interface SendPreview {
+  path: string;
+  name: string;
+  lines: number;
+  batches: number;
+}

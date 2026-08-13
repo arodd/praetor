@@ -194,7 +194,7 @@ These are the **terminal client** bindings. The desktop GUI mirrors the same key
 A, B, C, D, F, H, J, K, L, R, T, U, Y, Z, [ — VT100/readline/Ghostty conflicts
 
 ### Available Alt Keys for future bindings
-E, G, N, O, P, Q, V, W, X
+E, G, N, O, P, Q, V, W
 
 ### GUI-only Bindings
 
@@ -204,6 +204,8 @@ The desktop GUI adds bindings the TUI does not have:
 |-----|--------|
 | Ctrl+F | Scrollback search bar (Enter = older match, Shift+Enter = newer, Esc closes) |
 | Ctrl+R | Reverse history search, readline-style (type to filter, Ctrl+R = older match, Enter sends, Esc cancels, arrows/Home/End accept into the input) |
+| Alt+X | Abort: cancels an in-flight /send and switches to the `disable` mode |
+| Alt+I | Toggle reveal of suppressed (ignored) lines |
 
 Search matches are tinted in the output and the current match line is outlined.
 Both are handled in GameView's capture-phase keydown (see `searchOpen` /
@@ -256,6 +258,22 @@ A freeform notepad, GUI-only (the terminal client does not wire this up). Each n
 - `/notes delete <title>` — delete a note by title
 - `/notes list` — print `Title — preview…` lines into the output pane, most-recent first
 - Esc menu → Tools & References → **Notes** — opens the same modal
+
+## Multi-line Input
+
+The GUI command input is a textarea, matching Orchil. Plain Enter sends; Enter
+with any modifier (Shift/Ctrl/Alt) inserts a newline. Pasting multi-line text
+keeps its line breaks. Arrow Up/Down recall history only when the caret is on the
+first/last line, so they move within a block otherwise.
+
+A multi-line block is sent as a **single** WebSocket message with embedded
+newlines — the same framing Orchil uses (`conn.send(message+"\n")`) — and the
+server splits it. Slash commands are not interpreted inside a block.
+
+- `/send` — pick a text file, confirm the preview, and send its contents
+  - ≤50 lines go out as one message; longer files are chunked 20 lines at a time
+  - a completely empty line always ends a batch, regardless of length
+  - batches are 250ms apart; **Alt+X aborts** the remaining batches
 
 ## HTML Parsing
 

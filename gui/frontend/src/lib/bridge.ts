@@ -18,6 +18,7 @@ import type {
   UpdateInfo,
   NoteSummary,
   Note,
+  SendPreview,
 } from "./types";
 
 function app(): Record<string, (...a: any[]) => Promise<any>> | undefined {
@@ -152,6 +153,12 @@ export const getNote = (title: string) =>
 export const saveNote = (originalTitle: string, title: string, body: string) =>
   call<void>("SaveNote", undefined, originalTitle, title, body);
 export const deleteNote = (title: string) => call<void>("DeleteNote", undefined, title);
+
+// ---- Multi-line send ----
+export const pickSendFile = () =>
+  call<SendPreview>("PickSendFile", { path: "", name: "", lines: 0, batches: 0 });
+export const startFileSend = (path: string) => call<void>("StartFileSend", undefined, path);
+export const abortSend = () => call<boolean>("AbortSend", false);
 
 // ---- Events ----
 export function onEvents(cb: (batch: WireEvent[]) => void): () => void {
