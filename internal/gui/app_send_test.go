@@ -73,3 +73,31 @@ func TestAbortSend_StopsRemainingBatches(t *testing.T) {
 		t.Error("AbortSend returned true with no send in flight")
 	}
 }
+
+// TestStartFileSend_RefusesWhilePlayActive is the Fix-1 regression test for the
+// final review's interleaving finding: starting a /send while a /play
+// performance is running must be refused, symmetric to playPreflight refusing
+// a /play while a /send is in flight (see TestPlayPreflight_RefusesWhileSendActive
+// in app_play_test.go). Without this, the reviewer's SEND:s1 PLAY:p1..p5 SEND:s2
+// reproduction corrupts the wire.
+func TestStartFileSend_RefusesWhilePlayActive(t *testing.T) {
+	a, _ := playTestApp(t)
+	path := writeScript(t, "%wait-key\n") // holds indefinitely, keeping PlayActive true
+	if err := a.StartPlay(path); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+	t.Cleanup(func() { a.StopPlay() })
+
+	dir := t.TempDir()
+	sendPath := filepath.Join(dir, "lines.txt")
+	if err := os.WriteFile(sendPath, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.StartFileSend(sendPath); err == nil {
+		t.Fatal("StartFileSend succeeded while a performance was active — want a refusal")
+	}
+	if a.sendActive() {
+		t.Error("sendActive() is true after a refused StartFileSend")
+	}
+}

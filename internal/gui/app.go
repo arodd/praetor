@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -349,6 +350,16 @@ func (a *GuiApp) RemoveAccount(username string) error {
 // newlines (paste or modifier+Enter) goes out whole via SendBlock; a single line
 // keeps the existing path, which also interprets slash commands.
 func (a *GuiApp) Send(input string) {
+	// Every path that reaches the game funnels through here — the command
+	// input, numpad navigation, sidebar buttons, action sets, the status bar.
+	// The frontend lockout covers only the command input, so the authoritative
+	// gate lives here: during a performance nothing may interleave with the
+	// script. The four control commands (/pause, /resume, /stop, /next) use
+	// their own bindings and never reach Send, so this is purely additive.
+	if a.PlayActive() {
+		log.Printf("[PLAY] rejected input during performance: %q", input)
+		return
+	}
 	// Route on the input minus any trailing line terminators: a single command
 	// pasted with a trailing newline ("/mode aggro\n") is still single-line
 	// input and must keep reaching SendCommand, which interprets slash commands.

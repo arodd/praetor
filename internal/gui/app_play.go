@@ -90,6 +90,15 @@ func (a *GuiApp) playPreflight() error {
 	if c == nil || c.Session == nil || !c.Session.IsConnected() {
 		return fmt.Errorf("not connected — nothing was played")
 	}
+	// A /send in flight is exactly the interleaving hazard the mode check below
+	// exists for: two drivers writing to the socket at once corrupt both. Checked
+	// via sendActive(), which takes and releases sendMu on its own — never inline
+	// the field read here, and never call this while holding playMu (StartPlay
+	// calls playPreflight before it acquires playMu, so this is safe as written).
+	if a.sendActive() {
+		return fmt.Errorf(
+			"a /send is in flight — it would interleave with the performance on the wire; press Alt+X, or wait for the send to finish")
+	}
 	if c.Engine != nil {
 		if mode := c.Engine.CurrentMode(); mode != "" && mode != "disable" {
 			return fmt.Errorf(
@@ -139,7 +148,12 @@ func (a *GuiApp) StartPlay(path string) error {
 	return nil
 }
 
-// PlayActive reports whether a performance is running or paused.
+// PlayActive reports whether a performance is running or paused. Also used by
+// StartFileSend to refuse a /send while a performance is active (the reverse
+// of playPreflight's sendActive check). Takes and releases playMu only — never
+// hold sendMu while calling this, and never hold playMu while calling
+// sendActive: the two mutexes are never acquired together, in either order, or
+// a lock-ordering deadlock becomes possible where none exists today.
 func (a *GuiApp) PlayActive() bool {
 	a.playMu.Lock()
 	defer a.playMu.Unlock()
@@ -251,6 +265,16 @@ func (a *GuiApp) runPlay(s *playSession) {
 }
 
 // waitWhilePaused blocks until /resume or /stop. Returns false when stopped.
+//
+// Unlike s.pause and s.next (drained in runPlay before each step), s.resume is
+// deliberately NOT drained anywhere. That is safe only because this is a
+// RE-CHECKING LOOP, not a single select: a stale resume token consumed here
+// just costs one extra iteration — paused is re-read, found true, and the loop
+// blocks again on the next resume/cancel. If this loop is ever collapsed into
+// a single non-looping select (e.g. "select once on resume/cancel and
+// return"), that guarantee disappears and a stale token would let a later
+// pause fall straight through as a spurious wake. Keep the loop, or add a
+// drain, if this ever changes.
 func (a *GuiApp) waitWhilePaused(s *playSession) bool {
 	for {
 		a.playMu.Lock()

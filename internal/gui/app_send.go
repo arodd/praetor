@@ -60,8 +60,13 @@ func readSendFile(path string) (batches []string, lines int, err error) {
 }
 
 // StartFileSend reads path and begins sending its batches. Only one send runs at
-// a time: starting a second aborts the first.
+// a time: starting a second aborts the first. Refused outright while a /play
+// performance is active — see sendActive/PlayActive below for why the two
+// drivers must never run concurrently.
 func (a *GuiApp) StartFileSend(path string) error {
+	if a.PlayActive() {
+		return fmt.Errorf("a performance is running — a /send would interleave with it on the wire; press Alt+X, or wait for the performance to finish")
+	}
 	batches, _, err := readSendFile(path)
 	if err != nil {
 		return err
@@ -72,6 +77,17 @@ func (a *GuiApp) StartFileSend(path string) error {
 	a.AbortSend()
 	a.startSend(batches)
 	return nil
+}
+
+// sendActive reports whether a /send is currently in flight. Used by
+// playPreflight to refuse starting a performance while a send is running — the
+// two drivers must never write to the socket at once, or their output
+// interleaves on the wire. Takes and releases sendMu only; callers must never
+// hold playMu while calling this (see the lock-ordering note on PlayActive).
+func (a *GuiApp) sendActive() bool {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	return a.sendCancel != nil
 }
 
 // startSend spawns the driver goroutine for an already-split block. Split from

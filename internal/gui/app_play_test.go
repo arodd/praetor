@@ -151,6 +151,49 @@ func TestPlayPreflight_IdleModesAreAccepted(t *testing.T) {
 	}
 }
 
+// TestPlayPreflight_RefusesWhileSendActive is the Fix-1 regression test for
+// the final review's interleaving finding: playPreflight checked connectivity
+// and the Lua mode but never whether a /send was in flight, so starting a
+// /send then a /play let both drivers write to the socket at once (the
+// reviewer's SEND:s1 PLAY:p1..p5 SEND:s2 reproduction). This drives the REAL
+// playPreflight (no playCheck stub) so a future refactor that drops the
+// sendActive() check breaks this test instead of shipping silently.
+func TestPlayPreflight_RefusesWhileSendActive(t *testing.T) {
+	sess := newConnectedTestSession(t)
+	eng, err := engine.NewEngine(nil, nil, "")
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	t.Cleanup(eng.Close)
+
+	a := newTestApp(t)
+	a.deps.Client = &client.Client{Session: sess, Engine: eng}
+
+	// Keep a send in flight: one batch dispatched, the rest blocked on release.
+	release := make(chan struct{})
+	a.sendOne = func(string) error { <-release; return nil }
+	a.startSend([]string{"one", "two"})
+	t.Cleanup(func() { close(release) })
+	t.Cleanup(func() { a.AbortSend() })
+
+	// Give the driver a moment to record itself as active before asserting.
+	deadline := time.Now().Add(2 * time.Second)
+	for !a.sendActive() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !a.sendActive() {
+		t.Fatal("sendActive() is false after startSend — test setup didn't produce an in-flight send")
+	}
+
+	err = a.playPreflight()
+	if err == nil {
+		t.Fatal("playPreflight returned nil while a /send is in flight — want an error")
+	}
+	if !strings.Contains(err.Error(), "send") {
+		t.Errorf("error = %q, want it to mention the in-flight send", err.Error())
+	}
+}
+
 func TestStartPlay_SendsTextInOrderAndSkipsNotesAndComments(t *testing.T) {
 	a, sent := playTestApp(t)
 	path := writeScript(t, "# comment\nfirst\n%note:local only\n%wait:5s\nsecond\n")
@@ -585,6 +628,115 @@ func TestStartPlay_ProceedsWhenPreflightPasses(t *testing.T) {
 // recording-WebSocket harness /send's routing tests use) specifically because
 // the bug lived in real dispatch plumbing that playTestApp's playSend stub
 // bypasses entirely.
+// TestSend_RejectedDuringPerformance is the Fix-2 regression test from the
+// final review: GuiApp.Send is the single point every input path funnels
+// through — the command input, numpad navigation, the sidebar compass and
+// "sizeup here", action-set buttons, the status bar's cond/lighting, vitals
+// cond, and the kudos modal all call it directly, and only the command input
+// had its own frontend lockout. Gating Send itself is what makes the lockout
+// hold for the other seven call sites without touching seven frontend files.
+// Uses the real client/session/engine (the newSendRoutingApp harness /send's
+// routing tests use) so this exercises the actual wire path, not a stub.
+func TestSend_RejectedDuringPerformance(t *testing.T) {
+	a, recv := newSendRoutingApp(t)
+
+	path := writeScript(t, "%wait-key\n")
+	if err := a.StartPlay(path); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+	if !a.PlayActive() {
+		t.Fatal("PlayActive is false right after StartPlay")
+	}
+
+	a.Send("look")
+
+	select {
+	case msg := <-recv:
+		t.Fatalf("server received %q — Send must reject input while a performance is active", msg)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// A slash command must be blocked too, not just plain text: Send must
+	// return before it ever inspects the input for a leading "/".
+	a.Send("/mode aggro")
+	if got := a.CurrentMode(); got == "aggro" {
+		t.Fatalf("CurrentMode() = %q — Send must not process a slash command during a performance either", got)
+	}
+
+	// Sanity check: once the performance ends, Send works again.
+	if !a.StopPlay() {
+		t.Fatal("StopPlay returned false")
+	}
+	a.Send("look")
+	select {
+	case msg := <-recv:
+		if msg != "look" {
+			t.Fatalf("server received %q, want %q", msg, "look")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not reach the game after the performance ended")
+	}
+}
+
+// TestWaitFor_StaleCueBufferedDuringWaitKeyDoesNotSatisfyLaterWaitFor is the
+// Fix-3 regression test the final review supplied a recipe for: playWaitFor
+// drains text buffered before its own step began, so a cue seen earlier in
+// the scene cannot instantly satisfy a %wait-for reached later. This is
+// untested despite being the same defect class as three earlier Critical bugs
+// in this branch (see the stale-token tests above for /pause and /next).
+//
+// The recipe: hold on %wait-key, feed the cue text while still holding (so it
+// lands in s.text before the %wait-for step exists), release with /next, and
+// confirm the stale cue does NOT complete the %wait-for — only a cue fed AFTER
+// the step begins may.
+func TestWaitFor_StaleCueBufferedDuringWaitKeyDoesNotSatisfyLaterWaitFor(t *testing.T) {
+	a, sent := playTestApp(t)
+	// Never fires: only the live cue fed below may complete the %wait-for.
+	a.playAfter = func(time.Duration) <-chan time.Time { return make(chan time.Time) }
+
+	path := writeScript(t, "%wait-key\n%wait-for:the bell tolls\nafter the cue\n")
+	if err := a.StartPlay(path); err != nil {
+		t.Fatalf("StartPlay: %v", err)
+	}
+
+	// Let the driver actually reach and start holding on %wait-key before
+	// touching /next — otherwise an early /next can race runPlay's own
+	// top-of-iteration token drain (see TestNextPlayStep_EarlyCallDoesNotSkipWaitKey
+	// above) and get silently dropped before %wait-key ever consumes it, which
+	// would hang this test rather than exercise the drain this test targets.
+	select {
+	case s := <-sent:
+		t.Fatalf("sent %q before %%wait-key was released", s)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Feed the cue while still holding on %wait-key — buffered BEFORE the
+	// %wait-for step begins, and must be drained rather than consumed.
+	a.feedPlayText("the bell tolls across the city")
+
+	if !a.NextPlayStep() {
+		t.Fatal("NextPlayStep returned false while holding on %wait-key")
+	}
+
+	select {
+	case s := <-sent:
+		t.Fatalf("sent %q — a cue buffered before %%wait-for began must NOT satisfy it", s)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Now feed the cue live — this one lands after the step began and must
+	// complete the wait.
+	a.feedPlayText("the bell tolls across the city")
+	select {
+	case got := <-sent:
+		if got != "after the cue" {
+			t.Fatalf("sent %q, want %q", got, "after the cue")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("playback did not continue after the live cue")
+	}
+}
+
 func TestStartPlay_SlashLineReachesGameNotLocalCommand(t *testing.T) {
 	a, recv := newSendRoutingApp(t)
 

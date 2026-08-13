@@ -269,7 +269,7 @@ A freeform notepad, GUI-only (the terminal client does not wire this up). Each n
 - `/next` — release a `%wait-key` hold
 - Alt+X also stops an active performance (see Key Bindings below)
 
-While playing, only `/pause`, `/resume`, `/stop`, `/next` (and Alt+X) are accepted — everything else is rejected and never reaches the game. Configured via `play.wait_for_timeout` (default `60s`), the ceiling for a `%wait-for` that doesn't specify its own. See [docs/play-scripts.md](docs/play-scripts.md) for the complete script-language reference.
+While playing, only `/pause`, `/resume`, `/stop`, `/next` (and Alt+X) are accepted — everything else is rejected and never reaches the game. The gate is enforced once, centrally, in `GuiApp.Send` (`internal/gui/app.go`), so it covers every path that can reach the game — the command input, numpad navigation, sidebar buttons, action sets, the status bar — not just what's typed; the command input toasts, the others are silent no-ops (a held numpad key repeats, and a toast per repeat would spam). `/play` and `/send` are mutually exclusive: starting either while the other is active is refused, so their drivers can never interleave writes on the wire. Configured via `play.wait_for_timeout` (default `60s`), the ceiling for a `%wait-for` that doesn't specify its own. See [docs/play-scripts.md](docs/play-scripts.md) for the complete script-language reference.
 
 ## Multi-line Input
 
@@ -286,6 +286,7 @@ server splits it. Slash commands are not interpreted inside a block.
   - ≤50 lines go out as one message; longer files are chunked 20 lines at a time
   - a completely empty line always ends a batch, regardless of length
   - batches are 250ms apart; **Alt+X aborts** the remaining batches
+  - refused while a `/play` performance is active, and vice versa — the two drivers must never write to the socket concurrently
 
 ## HTML Parsing
 
