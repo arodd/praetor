@@ -926,7 +926,7 @@
     .prompt {
       display: none;
     }
-    input {
+    textarea {
       min-width: 0;
       min-height: 44px;
       font-size: 16px;
