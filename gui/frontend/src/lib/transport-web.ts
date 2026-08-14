@@ -152,6 +152,30 @@ export class WebTransport implements PraetorTransport {
         // Browser clients cannot open a native picker on the server host. The
         // web scripts editor accepts server-side paths as text instead.
         return fallback;
+      case "PickSendFile":
+      case "PickPlayFile":
+        // /send and /play read local files through a native picker and have no
+        // praetor-web endpoints yet. Both call sites catch and toast, so the
+        // browser user gets an explanation instead of a silent cancel.
+        throw new Error("/send and /play scripts are not available in the browser client yet.");
+      case "StartFileSend":
+      case "StartPlay":
+        // Unreachable in the browser: starting either flow requires a
+        // successful pick above. The explicit decision keeps the parity
+        // contract honest.
+        return fallback;
+      case "AbortSend":
+      case "PausePlay":
+      case "ResumePlay":
+      case "StopPlay":
+      case "NextPlayStep":
+      case "PlayActive":
+      case "PlayStatus":
+        // No file send or performance can exist in a browser session. These
+        // report the idle state (false / inactive status) so Alt+X, the
+        // pre-submit play gate, and the slash controls behave exactly like an
+        // idle desktop instead of erroring.
+        return fallback;
       case "RefreshGraphics":
         await this.request("POST", "/api/v1/graphics/refresh", {});
         return undefined as T;
@@ -739,6 +763,17 @@ export const WEB_SUPPORTED_METHODS = new Set([
   "SetMode",
   "ReloadScripts",
   "PickScriptDir",
+  "PickSendFile",
+  "StartFileSend",
+  "AbortSend",
+  "PickPlayFile",
+  "StartPlay",
+  "PausePlay",
+  "ResumePlay",
+  "StopPlay",
+  "NextPlayStep",
+  "PlayActive",
+  "PlayStatus",
   "RefreshGraphics",
   "ClipboardGet",
   "ClipboardSet",
