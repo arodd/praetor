@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/cyber-godzilla/praetor/internal/config"
+	appgui "github.com/cyber-godzilla/praetor/internal/gui"
+	"github.com/cyber-godzilla/praetor/internal/session"
 )
 
 // Account activation can legitimately outlive the web server's ordinary
@@ -36,22 +39,19 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, _ string)
 		return
 	}
 	s.conn = "connecting"
-	err := s.app.ConnectNew(req.Username, req.Password, req.Store)
+	result, err := s.app.ConnectNew(req.Username, req.Password, req.Store)
 	req.Password = ""
 	if err != nil {
 		s.conn = "disconnected"
-		if req.Store {
-			s.broadcastAccountsLocked()
-		}
 		s.log.Printf("web game connect failed: %v", err)
 		s.writeError(w, http.StatusBadGateway, "game_connect_failed", "Unable to connect to the shared game session.")
 		return
 	}
 	s.conn = "connected"
-	if req.Store {
-		s.broadcastAccountsLocked()
+	if result.AccountState != nil {
+		s.broadcastAccountStateLocked(*result.AccountState)
 	}
-	s.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleConnectStored(w http.ResponseWriter, r *http.Request, _ string) {
@@ -73,11 +73,22 @@ func (s *Server) handleConnectStored(w http.ResponseWriter, r *http.Request, _ s
 	if err := s.app.ConnectStored(req.Username); err != nil {
 		s.conn = "disconnected"
 		s.log.Printf("web stored-account connect failed: %v", err)
+		var credentialErr *appgui.CredentialStoreError
+		if errors.As(err, &credentialErr) {
+			state := s.app.ListAccounts()
+			s.broadcastAccountStateLocked(state)
+			if errors.Is(err, session.ErrNoCredentials) {
+				s.writeError(w, http.StatusNotFound, "stored_account_not_found", "Stored credentials were not found for this account.")
+				return
+			}
+			s.writeError(w, http.StatusServiceUnavailable, "credential_store_unavailable", state.CredentialStore.Message)
+			return
+		}
 		s.writeError(w, http.StatusBadGateway, "game_connect_failed", "Unable to connect with the stored account.")
 		return
 	}
 	s.conn = "connected"
-	s.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.writeJSON(w, http.StatusOK, appgui.ConnectResult{Connected: true})
 }
 
 func (s *Server) extendConnectionResponseDeadline(w http.ResponseWriter) {
@@ -129,9 +140,9 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request, _ string)
 
 func (s *Server) handleAccounts(w http.ResponseWriter, _ *http.Request, _ string) {
 	s.opMu.Lock()
-	accounts := s.app.ListAccounts()
+	state := s.app.ListAccounts()
 	s.opMu.Unlock()
-	s.writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
+	s.writeJSON(w, http.StatusOK, state)
 }
 
 func (s *Server) handleSaveAccount(w http.ResponseWriter, r *http.Request, _ string) {
@@ -153,7 +164,9 @@ func (s *Server) handleSaveAccount(w http.ResponseWriter, r *http.Request, _ str
 	req.Password = ""
 	if err != nil {
 		s.log.Printf("web account save failed: %v", err)
-		s.writeError(w, http.StatusInternalServerError, "account_save_failed", "Unable to save credentials in the server keyring.")
+		state := s.app.ListAccounts()
+		s.broadcastAccountStateLocked(state)
+		s.writeError(w, http.StatusServiceUnavailable, "credential_store_unavailable", state.CredentialStore.Message)
 		return
 	}
 	s.broadcastAccountsLocked()
@@ -170,7 +183,9 @@ func (s *Server) handleRemoveAccount(w http.ResponseWriter, r *http.Request, _ s
 	defer s.opMu.Unlock()
 	if err := s.app.RemoveAccount(name); err != nil {
 		s.log.Printf("web account removal failed: %v", err)
-		s.writeError(w, http.StatusInternalServerError, "account_remove_failed", "Unable to remove credentials from the server keyring.")
+		state := s.app.ListAccounts()
+		s.broadcastAccountStateLocked(state)
+		s.writeError(w, http.StatusServiceUnavailable, "credential_store_unavailable", state.CredentialStore.Message)
 		return
 	}
 	s.broadcastAccountsLocked()
@@ -281,6 +296,8 @@ func (s *Server) applySetting(operation string, raw json.RawMessage) error {
 		return settingValue(raw, s.app.SetMobileLowercaseFirstLetter)
 	case "mobile-output-font-size":
 		return settingValue(raw, s.app.SetMobileOutputFontSize)
+	case "retain-app-logs":
+		return settingValue(raw, s.app.SetRetainAppLogs)
 	case "session-logging":
 		return settingValue(raw, s.app.SetSessionLogging)
 	case "log-path":
@@ -564,5 +581,10 @@ func (s *Server) commitConfigLocked() json.RawMessage {
 }
 
 func (s *Server) broadcastAccountsLocked() {
-	s.hub.BroadcastState(Envelope{Type: "accounts", Accounts: s.app.ListAccounts()})
+	s.broadcastAccountStateLocked(s.app.ListAccounts())
+}
+
+func (s *Server) broadcastAccountStateLocked(state appgui.AccountState) {
+	status := state.CredentialStore
+	s.hub.BroadcastState(Envelope{Type: "accounts", Accounts: cloneAccounts(state.Accounts), CredentialStore: &status})
 }

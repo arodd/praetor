@@ -54,6 +54,7 @@
       }
     } else if (update.type === "accounts") {
       store.accounts = update.accounts ?? [];
+      if (update.credentialStore) store.credentialStore = update.credentialStore;
     } else if (update.type === "operation" && update.result) {
       store.addToast(update.result.ok ? "Operation complete" : "Operation failed", update.result.message ?? "");
     } else if (update.type === "transport" && update.transportState) {
