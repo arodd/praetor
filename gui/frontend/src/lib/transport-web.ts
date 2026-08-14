@@ -32,6 +32,20 @@ interface ErrorResponse {
   error?: { code?: string; message?: string; requestId?: string };
 }
 
+interface SessionSignal {
+  type: "praetor-session-changed";
+  action: "login" | "logout";
+  source: string;
+  generation: string;
+}
+
+interface BootstrapRefresh {
+  init: WebBootstrap;
+  serverChanged: boolean;
+}
+
+const sessionChannelName = "praetor-web-session-v1";
+
 class WebAPIError extends Error {
   status: number;
   code: string;
@@ -57,6 +71,30 @@ export class WebTransport implements PraetorTransport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   private socketReady = false;
+  private csrfRefresh: Promise<BootstrapRefresh> | null = null;
+  private authExpired = false;
+  private readonly sessionSource = randomSessionMarker();
+  private sessionChannel: BroadcastChannel | null = null;
+
+  constructor() {
+    if (
+      typeof window !== "undefined" &&
+      typeof BroadcastChannel !== "undefined"
+    ) {
+      try {
+        this.sessionChannel = new BroadcastChannel(sessionChannelName);
+        this.sessionChannel.onmessage = (event: MessageEvent<unknown>) => {
+          const signal = parseSessionSignal(event.data);
+          if (!signal || signal.source === this.sessionSource) return;
+          void this.handleSessionSignal(signal);
+        };
+      } catch {
+        // Some embedded/private browser contexts expose BroadcastChannel but
+        // deny its construction. Typed CSRF recovery remains the fallback.
+        this.sessionChannel = null;
+      }
+    }
+  }
 
   async invoke<T>(method: string, fallback: T, ...args: any[]): Promise<T> {
     switch (method) {
@@ -223,9 +261,11 @@ export class WebTransport implements PraetorTransport {
   async webLogin(password: string): Promise<void> {
     await this.request("POST", "/api/v1/auth/login", { password }, false);
     this.started = false;
+    this.authExpired = false;
     this.reconnectAttempt = 0;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.broadcastSessionChange("login");
   }
 
   async webLogout(): Promise<void> {
@@ -237,16 +277,8 @@ export class WebTransport implements PraetorTransport {
       // with the in-memory server process and a later login replaces it.
       console.warn("Praetor logout request did not complete:", error);
     } finally {
-      this.started = false;
-      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-      this.socket?.close(1000, "signed out");
-      this.socket = null;
-      this.csrf = "";
-      this.serverId = "";
-      this.sequence = 0;
-      this.socketReady = false;
-      this.emitSystem({ type: "auth-expired" });
+      this.broadcastSessionChange("logout");
+      this.expireAuthentication("signed out");
     }
   }
 
@@ -266,10 +298,24 @@ export class WebTransport implements PraetorTransport {
   }
 
   private installBootstrap(init: WebBootstrap) {
-    if (init.protocol !== 1) throw new Error(`Unsupported Praetor web protocol ${init.protocol}`);
+    if (init.protocol !== 1) {
+      throw new Error(`Unsupported Praetor web protocol ${init.protocol}`);
+    }
+    if (
+      typeof init.csrf !== "string" ||
+      init.csrf === "" ||
+      typeof init.serverId !== "string" ||
+      init.serverId === "" ||
+      typeof init.configRevision !== "number" ||
+      !Number.isSafeInteger(init.configRevision) ||
+      init.configRevision < 0
+    ) {
+      throw new Error("Invalid Praetor web bootstrap");
+    }
     this.csrf = init.csrf;
     this.revision = init.configRevision;
     this.serverId = init.serverId;
+    this.authExpired = false;
   }
 
   private openSocket() {
@@ -289,7 +335,11 @@ export class WebTransport implements PraetorTransport {
       }
     };
     socket.onclose = () => {
-      if (this.socket === socket) this.socket = null;
+      // A deliberate session refresh can replace the socket before the old
+      // close event arrives. That retired socket must not mark its replacement
+      // disconnected or schedule an extra reconnect.
+      if (this.socket !== socket) return;
+      this.socket = null;
       this.socketReady = false;
       if (this.started) {
         this.emitSystem({ type: "transport", transportState: "reconnecting" });
@@ -355,8 +405,7 @@ export class WebTransport implements PraetorTransport {
         this.openSocket();
       } catch (error) {
         if (error instanceof WebAuthRequiredError) {
-          this.started = false;
-          this.emitSystem({ type: "auth-expired" });
+          this.expireAuthentication("authentication expired");
         } else if (this.started) {
           this.scheduleReconnect();
         }
@@ -364,38 +413,185 @@ export class WebTransport implements PraetorTransport {
     }, delay);
   }
 
-  private async request<T = unknown>(method: string, url: string, body?: unknown, authenticated = true): Promise<T> {
+  private async request<T = unknown>(
+    method: string,
+    url: string,
+    body?: unknown,
+    authenticated = true,
+  ): Promise<T> {
+    const response = await this.fetchResponse(method, url, body, authenticated);
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  }
+
+  private async fetchResponse(
+    method: string,
+    url: string,
+    body?: unknown,
+    authenticated = true,
+    allowCSRFRecovery = true,
+    bypassSocketGate = false,
+  ): Promise<Response> {
     if (
       authenticated &&
       method !== "GET" &&
       method !== "HEAD" &&
       url !== "/api/v1/auth/logout" &&
       this.started &&
-      !this.socketReady
+      !this.socketReady &&
+      !bypassSocketGate
     ) {
       throw new Error("Praetor is reconnecting; wait for current state before making changes.");
     }
     const headers: Record<string, string> = { Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    if (authenticated && method !== "GET" && method !== "HEAD") headers["X-Praetor-CSRF"] = this.csrf;
+    const mutating = method !== "GET" && method !== "HEAD";
+    const sentCSRF = authenticated && mutating ? this.csrf : "";
+    if (sentCSRF) headers["X-Praetor-CSRF"] = sentCSRF;
     const response = await fetch(url, {
       method,
       headers,
       credentials: "same-origin",
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (response.status === 401) throw new WebAuthRequiredError();
-    if (!response.ok) {
-      let detail: ErrorResponse = {};
-      try { detail = await response.json(); } catch { /* use status fallback */ }
-      throw new WebAPIError(
-        response.status,
-        detail.error?.code ?? "request_failed",
-        detail.error?.message ?? `Request failed (${response.status})`,
-      );
+    if (response.status === 401 && authenticated) {
+      this.expireAuthentication("authentication expired");
+      throw new WebAuthRequiredError();
     }
-    if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    if (!response.ok) {
+      const error = await responseError(response);
+      if (
+        authenticated &&
+        mutating &&
+        allowCSRFRecovery &&
+        error.status === 403 &&
+        error.code === "csrf_rejected"
+      ) {
+        let serverChanged = false;
+        // Another concurrent request may already have installed the new token
+        // by the time this rejection arrives. In that case retry directly
+        // instead of performing a redundant bootstrap.
+        if (!sentCSRF || sentCSRF === this.csrf) {
+          ({ serverChanged } = await this.refreshBootstrap());
+        }
+        if (serverChanged) {
+          this.restartSocket("server restarted");
+          throw new Error(
+            "Praetor restarted and is resynchronizing. Review current state, then try again.",
+          );
+        }
+        // A same-profile login signal may be replacing the event socket at
+        // this point. The one replay is still safe: the rejected request never
+        // reached its handler, the server process is unchanged, and the fresh
+        // bootstrap authenticated the cookie now used by fetch.
+        return this.fetchResponse(
+          method,
+          url,
+          body,
+          authenticated,
+          false,
+          true,
+        );
+      }
+      throw error;
+    }
+    return response;
+  }
+
+  private async refreshBootstrap(): Promise<BootstrapRefresh> {
+    if (this.csrfRefresh) return this.csrfRefresh;
+    this.csrfRefresh = (async () => {
+      const previousServerID = this.serverId;
+      const response = await this.fetchResponse(
+        "GET",
+        "/api/v1/bootstrap",
+        undefined,
+        true,
+        false,
+      );
+      let init: WebBootstrap;
+      try {
+        init = (await response.json()) as WebBootstrap;
+        this.installBootstrap(init);
+      } catch {
+        this.expireAuthentication("invalid authentication bootstrap");
+        throw new WebAuthRequiredError();
+      }
+      return {
+        init,
+        serverChanged:
+          previousServerID !== "" && previousServerID !== init.serverId,
+      };
+    })();
+    try {
+      return await this.csrfRefresh;
+    } finally {
+      this.csrfRefresh = null;
+    }
+  }
+
+  private async handleSessionSignal(signal: SessionSignal) {
+    if (signal.action === "logout") {
+      this.expireAuthentication("signed out in another tab");
+      return;
+    }
+    try {
+      const { serverChanged } = await this.refreshBootstrap();
+      if (this.started) {
+        this.restartSocket(
+          serverChanged ? "server session changed" : "browser session changed",
+        );
+      } else {
+        this.emitSystem({ type: "auth-restored" });
+      }
+    } catch (error) {
+      if (!(error instanceof WebAuthRequiredError)) {
+        console.warn("Praetor session refresh did not complete:", error);
+      }
+    }
+  }
+
+  private restartSocket(reason: string) {
+    const socket = this.socket;
+    this.socket = null;
+    this.socketReady = false;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    socket?.close(1000, reason);
+    if (this.started) {
+      this.emitSystem({ type: "transport", transportState: "reconnecting" });
+      this.openSocket();
+    }
+  }
+
+  private expireAuthentication(reason: string) {
+    this.started = false;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.socket?.close(1000, reason);
+    this.socket = null;
+    this.csrf = "";
+    this.serverId = "";
+    this.sequence = 0;
+    this.socketReady = false;
+    this.csrfRefresh = null;
+    if (!this.authExpired) {
+      this.authExpired = true;
+      this.emitSystem({ type: "auth-expired" });
+    }
+  }
+
+  private broadcastSessionChange(action: SessionSignal["action"]) {
+    try {
+      this.sessionChannel?.postMessage({
+        type: "praetor-session-changed",
+        action,
+        source: this.sessionSource,
+        generation: randomSessionMarker(),
+      } satisfies SessionSignal);
+    } catch {
+      // Other tabs still recover reactively if a channel closes unexpectedly.
+    }
   }
 
   private async updateSetting(operation: string, value: unknown) {
@@ -413,17 +609,11 @@ export class WebTransport implements PraetorTransport {
   }
 
   private async downloadPersistent(keys: string[]): Promise<string> {
-    if (this.started && !this.socketReady) {
-      throw new Error("Praetor is reconnecting; wait for current state before exporting data.");
-    }
-    const response = await fetch("/api/v1/persistent/export", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json", "X-Praetor-CSRF": this.csrf },
-      body: JSON.stringify({ keys }),
-    });
-    if (response.status === 401) throw new WebAuthRequiredError();
-    if (!response.ok) throw new Error(`Export failed (${response.status})`);
+    const response = await this.fetchResponse(
+      "POST",
+      "/api/v1/persistent/export",
+      { keys },
+    );
     const blob = await response.blob();
     const disposition = response.headers.get("Content-Disposition") ?? "";
     const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? "persistent.json";
@@ -454,6 +644,48 @@ export class WebTransport implements PraetorTransport {
     field.remove();
     if (!copied) throw new Error("Browser clipboard write is unavailable; copy the selected text manually.");
   }
+}
+
+async function responseError(response: Response): Promise<WebAPIError> {
+  let detail: ErrorResponse = {};
+  try {
+    detail = await response.json();
+  } catch {
+    // Use the status fallback when the response is not a typed API error.
+  }
+  return new WebAPIError(
+    response.status,
+    detail.error?.code ?? "request_failed",
+    detail.error?.message ?? `Request failed (${response.status})`,
+  );
+}
+
+function parseSessionSignal(value: unknown): SessionSignal | null {
+  if (!value || typeof value !== "object") return null;
+  const signal = value as Partial<SessionSignal>;
+  if (
+    signal.type !== "praetor-session-changed" ||
+    (signal.action !== "login" && signal.action !== "logout") ||
+    typeof signal.source !== "string" ||
+    signal.source === "" ||
+    typeof signal.generation !== "string" ||
+    signal.generation === ""
+  ) {
+    return null;
+  }
+  return signal as SessionSignal;
+}
+
+function randomSessionMarker(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const values = new Uint32Array(4);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(values);
+    return [...values].map((value) => value.toString(16).padStart(8, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 interface ConfigMutationResponse {

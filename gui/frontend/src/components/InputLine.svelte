@@ -440,7 +440,12 @@
     try {
       await submitOnce();
     } catch (error) {
-      store.addToast("Command failed", error instanceof Error ? error.message : String(error));
+      // The web transport has already moved the application back to its
+      // authentication screen. Do not leave a redundant command-failure toast
+      // behind for every request that observed the expired session.
+      if (!(error instanceof api.WebAuthRequiredError)) {
+        store.addToast("Command failed", error instanceof Error ? error.message : String(error));
+      }
     } finally {
       submitting = false;
       // A disabled input is blurred by browsers while the request is in

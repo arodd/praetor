@@ -34,11 +34,13 @@
 
   function applySystem(update: SystemUpdate) {
     if (update.type === "auth-expired") {
-      unsub?.();
-      unsub = undefined;
       store.resetSession();
       store.transportReady = false;
       webLocked = true;
+      return;
+    }
+    if (update.type === "auth-restored") {
+      if (webLocked) void initialize();
       return;
     }
     if (update.type === "config" && update.config) {
@@ -95,6 +97,16 @@
     ready = false;
     startupError = "";
     if (api.inWeb()) store.transportReady = false;
+    // Keep the transport subscription alive while the web-password screen is
+    // shown. Another same-profile tab can replace the shared session cookie,
+    // and the transport must be able to tell this tab to bootstrap again.
+    if (!unsub) {
+      unsub = api.onEvents(
+        applyEvents,
+        (snapshot) => store.installSnapshot(snapshot),
+        applySystem,
+      );
+    }
     try {
       const init = await api.getInitState();
       store.version = init.version;
@@ -110,13 +122,8 @@
       webLocked = false;
       ready = true;
 
-      // Subscribe before Start() so we never miss early events.
-      unsub?.();
-      unsub = api.onEvents(
-        applyEvents,
-        (snapshot) => store.installSnapshot(snapshot),
-        applySystem,
-      );
+      // The subscription is installed before bootstrap so we never miss
+      // cross-tab authentication changes or early event snapshots.
       await api.start();
       scheduleUpdateCheck();
     } catch (error) {

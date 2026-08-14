@@ -117,6 +117,112 @@ func TestMutatingRouteRequiresOriginAndCSRF(t *testing.T) {
 	}
 }
 
+func TestCSRFRejectionOccursBeforeMutationHandler(t *testing.T) {
+	srv, handler := newTestServer(t)
+	cookie, csrf := loginRequest(t, handler)
+	calls := 0
+	protected := srv.protected(true, func(w http.ResponseWriter, _ *http.Request, _ string) {
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	request := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"http://praetor.test/test-mutation",
+			bytes.NewBufferString(`{"value":"test"}`),
+		)
+		req.Host = "praetor.test"
+		req.Header.Set("Origin", "http://praetor.test")
+		req.Header.Set("X-Praetor-CSRF", token)
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		rr := httptest.NewRecorder()
+		protected.ServeHTTP(rr, req)
+		return rr
+	}
+
+	rejected := request("stale-token")
+	if rejected.Code != http.StatusForbidden ||
+		!strings.Contains(rejected.Body.String(), `"code":"csrf_rejected"`) {
+		t.Fatalf(
+			"rejected status=%d body=%s",
+			rejected.Code,
+			rejected.Body.String(),
+		)
+	}
+	if calls != 0 {
+		t.Fatalf("mutation handler called %d times after CSRF rejection", calls)
+	}
+
+	accepted := request(csrf)
+	if accepted.Code != http.StatusNoContent {
+		t.Fatalf(
+			"accepted status=%d body=%s",
+			accepted.Code,
+			accepted.Body.String(),
+		)
+	}
+	if calls != 1 {
+		t.Fatalf("mutation handler calls=%d, want 1", calls)
+	}
+}
+
+func TestSuccessfulLoginReplacesCallingBrowserSession(t *testing.T) {
+	_, handler := newTestServer(t)
+	oldCookie, _ := loginRequest(t, handler)
+
+	login := httptest.NewRequest(
+		http.MethodPost,
+		"http://praetor.test/api/v1/auth/login",
+		bytes.NewBufferString(`{"password":"test password"}`),
+	)
+	login.Host = "praetor.test"
+	login.RemoteAddr = "192.0.2.5:1234"
+	login.Header.Set("Origin", "http://praetor.test")
+	login.Header.Set("Content-Type", "application/json")
+	login.AddCookie(oldCookie)
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"replacement login status=%d body=%s",
+			loginResponse.Code,
+			loginResponse.Body.String(),
+		)
+	}
+	cookies := loginResponse.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Value == oldCookie.Value {
+		t.Fatalf("replacement login cookies=%#v", cookies)
+	}
+
+	bootstrap := func(cookie *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"http://praetor.test/api/v1/bootstrap",
+			nil,
+		)
+		req.Host = "praetor.test"
+		req.AddCookie(cookie)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+	if oldResponse := bootstrap(oldCookie); oldResponse.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"old session status=%d body=%s",
+			oldResponse.Code,
+			oldResponse.Body.String(),
+		)
+	}
+	if newResponse := bootstrap(cookies[0]); newResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"replacement session status=%d body=%s",
+			newResponse.Code,
+			newResponse.Body.String(),
+		)
+	}
+}
+
 func loginRequest(t *testing.T, handler http.Handler) (*http.Cookie, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "http://praetor.test/api/v1/auth/login", bytes.NewBufferString(`{"password":"test password"}`))

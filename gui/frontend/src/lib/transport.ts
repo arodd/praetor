@@ -1,7 +1,14 @@
 import type { AppConfig, InitState, WireEvent } from "./types";
 
 export interface SystemUpdate {
-  type: "config" | "modes" | "accounts" | "operation" | "auth-expired" | "transport";
+  type:
+    | "config"
+    | "modes"
+    | "accounts"
+    | "operation"
+    | "auth-expired"
+    | "auth-restored"
+    | "transport";
   config?: AppConfig;
   revision?: number;
   modeNames?: string[];

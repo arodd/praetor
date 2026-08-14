@@ -196,6 +196,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "login_failed", "Authentication failed.")
 		return
 	}
+	// Tabs in one browser profile share a cookie jar. A successful replacement
+	// login supersedes that profile's previous session, including WebSockets
+	// that still carry the old cookie. Independent profiles and devices do not
+	// send that cookie and retain their own sessions.
+	s.auth.Logout(r)
 	s.auth.SetCookie(w, r, token)
 	w.Header().Set("Cache-Control", "no-store")
 	s.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

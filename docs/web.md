@@ -290,12 +290,30 @@ The login screen shown first is the Praetor web-password gate. It is separate
 from the subsequent TEC account screen and never prefills or stores TEC
 credentials.
 
-- **Sign out of web UI** invalidates only that browser's opaque session.
+- **Sign out of web UI** invalidates the opaque session held by that browser
+  cookie jar. Tabs in the same browser profile share that cookie and therefore
+  sign out together. A different browser profile or device has an independent
+  session and remains signed in.
 - **Disconnect shared game** closes the one TEC session and returns every
   browser to TEC account selection/login.
 - Closing a tab, changing networks, or reconnecting a browser does not reconnect
   or disconnect TEC. The browser receives an atomic bounded-history snapshot,
   then resumes ordered live updates.
+- Logging in again from one tab replaces the session cookie shared by the other
+  tabs in that browser profile and revokes the profile's superseded server
+  session. Praetor sends a non-secret same-origin notification so those tabs
+  fetch their own current CSRF token and reconnect their event stream. No
+  password, cookie, CSRF token, TEC credential, account data, or game text is
+  sent through the cross-tab notification.
+- If a tab misses that notification, a typed CSRF rejection causes one
+  authenticated bootstrap refresh and one bounded retry. Praetor retries only
+  this pre-handler rejection; it does not automatically replay arbitrary
+  forbidden responses, network failures, timeouts, revision conflicts, or any
+  request whose completion is uncertain.
+- Browser sessions are intentionally process-local. Restarting `praetor-web`
+  invalidates them and returns pre-restart tabs to the web-password screen.
+  The shared TEC connection also ends with the process; it is not reconstructed
+  from browser state.
 - A settings change, script reload, mode switch, credential-store mutation, Kudos update,
   persistent-data clear, or command affects the shared process.
 - Input drafts, command history, active tab, scroll position, unread markers,
