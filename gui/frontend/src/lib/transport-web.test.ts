@@ -122,6 +122,152 @@ describe("web transport operation parity", () => {
     });
   });
 
+  it("batches hundreds of adjacent one-envelope lines before UI reconciliation", async () => {
+    const transport = new WebTransport();
+    const chunkSizes: number[] = [];
+    const received: number[] = [];
+    const closes: Array<[number, string]> = [];
+    const socket = {
+      close: (code: number, reason: string) => closes.push([code, reason]),
+    } as unknown as WebSocket;
+    transport.subscribe({
+      snapshot: () => {},
+      events: (events) => {
+        chunkSizes.push(events.length);
+        received.push(...events.map((event) => Number(event.text?.text)));
+      },
+    });
+    await (transport as any).handleEnvelope({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 0,
+      events: [],
+    });
+    (transport as any).streamEpoch = 1;
+    (transport as any).socket = socket;
+
+    for (let sequence = 1; sequence <= 217; sequence++) {
+      (transport as any).receiveSocketData(socket, 1, JSON.stringify({
+        type: "events",
+        protocol: 1,
+        serverId: "server-a",
+        sequence,
+        fromSequence: sequence,
+        toSequence: sequence,
+        events: [{
+          kind: Kind.Text,
+          text: { text: String(sequence), segments: [{ text: String(sequence) }] },
+        }],
+      }));
+    }
+
+    await vi.waitFor(() => expect((transport as any).sequence).toBe(217));
+    expect(closes).toEqual([]);
+    expect(chunkSizes).toEqual([100, 100, 17]);
+    expect(received).toEqual(Array.from({ length: 217 }, (_, index) => index + 1));
+    expect(transport.eventStreamDiagnostics()).toMatchObject({
+      appliedEnvelopes: 218,
+      appliedEvents: 217,
+      mainThreadYields: 2,
+    });
+  });
+
+  it("resumes retained browser state without reinstalling scrollback", async () => {
+    const transport = new WebTransport();
+    const snapshots: string[][] = [];
+    const live: string[] = [];
+    const states: string[] = [];
+    transport.subscribe({
+      snapshot: (events) => snapshots.push(
+        events.map((event) => event.text?.text ?? ""),
+      ),
+      events: (events) => live.push(
+        ...events.map((event) => event.text?.text ?? ""),
+      ),
+      system: (update) => {
+        if (update.type === "transport") states.push(update.transportState ?? "");
+      },
+    });
+    await (transport as any).handleEnvelope({
+      type: "snapshot",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 4,
+      events: [{
+        kind: Kind.Text,
+        text: { text: "retained", segments: [{ text: "retained" }] },
+      }],
+    });
+    await (transport as any).handleEnvelope({
+      type: "events",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 5,
+      fromSequence: 5,
+      toSequence: 5,
+      events: [{
+        kind: Kind.Text,
+        text: { text: "before-close", segments: [{ text: "before-close" }] },
+      }],
+    });
+    await (transport as any).handleEnvelope({
+      type: "resume",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 5,
+    });
+    await (transport as any).handleEnvelope({
+      type: "events",
+      protocol: 1,
+      serverId: "server-a",
+      sequence: 6,
+      fromSequence: 6,
+      toSequence: 6,
+      events: [{
+        kind: Kind.Text,
+        text: { text: "missed-while-closed", segments: [{ text: "missed-while-closed" }] },
+      }],
+    });
+
+    expect(snapshots).toEqual([["retained"]]);
+    expect(live).toEqual(["before-close", "missed-while-closed"]);
+    expect(states).toEqual(["connected", "connected"]);
+    expect((transport as any).sequence).toBe(6);
+  });
+
+  it("requests sequence resumption only after an authoritative snapshot", () => {
+    const urls: string[] = [];
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(url: string) {
+        urls.push(url);
+      }
+      close() {}
+    }
+    vi.stubGlobal("location", { protocol: "https:", host: "praetor.test" });
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const transport = new WebTransport();
+    Object.assign(transport as any, {
+      started: true,
+      csrf: "csrf",
+      serverId: "server-a",
+      sequence: 42,
+      canResume: true,
+    });
+
+    (transport as any).openSocket();
+
+    expect(urls).toHaveLength(1);
+    const url = new URL(urls[0]);
+    expect(url.searchParams.get("sequence_ranges")).toBe("1");
+    expect(url.searchParams.get("resume_server_id")).toBe("server-a");
+    expect(url.searchParams.get("after_sequence")).toBe("42");
+  });
+
   it("measures reconciliation and output-pane layout after applied chunks", async () => {
     vi.stubGlobal("document", {
       querySelector: vi.fn(() => ({ scrollHeight: 4096 })),

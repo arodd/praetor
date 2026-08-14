@@ -9,11 +9,13 @@ import (
 const ProtocolVersion = 1
 
 // Envelope is the versioned server-to-browser WebSocket protocol. Events are
-// ordered game/application updates; Snapshot is present only on the first
-// message for a subscription. Config and mode/account updates are authoritative
-// shared-state changes initiated by any connected browser. Current web clients
-// opt into adjacent event-range coalescing; Sequence remains the range end and
-// legacy subscribers continue to receive one sequence per envelope.
+// ordered game/application updates. The first subscription message is either
+// an authoritative Snapshot or a Resume handshake for a browser whose retained
+// state is still covered by the bounded server journal. Config and mode/account
+// updates are authoritative shared-state changes initiated by any connected
+// browser. Current web clients opt into adjacent event-range coalescing;
+// Sequence remains the range end and legacy subscribers continue to receive one
+// sequence per envelope.
 type Envelope struct {
 	Type            string                        `json:"type"`
 	Protocol        int                           `json:"protocol"`

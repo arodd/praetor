@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -242,8 +243,26 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, _ string) 
 	}
 	defer conn.Close()
 
-	sequenceRanges := r.URL.Query().Get("sequence_ranges") == "1"
-	sub, snapshot := s.hub.SubscribeWithSequenceRanges(sequenceRanges)
+	query := r.URL.Query()
+	sequenceRanges := query.Get("sequence_ranges") == "1"
+	resumeServerID := query.Get("resume_server_id")
+	afterSequence, resumeRequested := uint64(0), resumeServerID != ""
+	if resumeRequested {
+		parsed, parseErr := strconv.ParseUint(query.Get("after_sequence"), 10, 64)
+		if parseErr != nil || len(resumeServerID) > 128 {
+			// Treat malformed/oversized resumption metadata as an ordinary late
+			// join. Authentication and origin checks still govern the connection.
+			resumeServerID = ""
+			resumeRequested = false
+		} else {
+			afterSequence = parsed
+		}
+	}
+	sub, initial := s.hub.SubscribeWithResume(
+		sequenceRanges,
+		resumeServerID,
+		afterSequence,
+	)
 	if sub.ID == 0 {
 		s.closeEventWebSocket(
 			conn,
@@ -255,9 +274,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, _ string) 
 		return
 	}
 	s.log.Printf(
-		"web_event_stream event=subscription_created subscriber_id=%d sequence_ranges=%t active_subscribers=%d",
+		"web_event_stream event=subscription_created subscriber_id=%d sequence_ranges=%t resume_requested=%t initial_type=%s after_sequence=%d active_subscribers=%d",
 		sub.ID,
 		sequenceRanges,
+		resumeRequested,
+		initial.Type,
+		afterSequence,
 		s.hub.Diagnostics().ActiveSubscribers,
 	)
 	terminationReason := "handler_exit"
@@ -308,15 +330,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, _ string) 
 		)
 		return
 	}
-	snapshotBytes, snapshotDuration, err := writeWebSocketJSON(conn, snapshot)
-	sub.recordWrite(snapshotBytes, snapshotDuration, err)
+	initialBytes, initialDuration, err := writeWebSocketJSON(conn, initial)
+	sub.recordWrite(initialBytes, initialDuration, err)
 	if err != nil {
-		terminationReason = "snapshot_write_error"
+		terminationReason = "initial_write_error"
 		s.log.Printf(
-			"web_event_stream event=websocket_write_error subscriber_id=%d envelope_type=snapshot bytes=%d duration_ms=%d reason=%s",
+			"web_event_stream event=websocket_write_error subscriber_id=%d envelope_type=%s bytes=%d duration_ms=%d reason=%s",
 			sub.ID,
-			snapshotBytes,
-			snapshotDuration.Milliseconds(),
+			initial.Type,
+			initialBytes,
+			initialDuration.Milliseconds(),
 			terminationReason,
 		)
 		return

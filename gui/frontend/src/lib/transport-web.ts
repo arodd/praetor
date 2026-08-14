@@ -20,7 +20,15 @@ import type {
 import { WebAuthRequiredError } from "./transport";
 
 interface WebEnvelope {
-  type: "snapshot" | "events" | "config" | "modes" | "accounts" | "operation" | "commandHistory";
+  type:
+    | "snapshot"
+    | "resume"
+    | "events"
+    | "config"
+    | "modes"
+    | "accounts"
+    | "operation"
+    | "commandHistory";
   protocol: number;
   serverId: string;
   sequence?: number;
@@ -77,6 +85,7 @@ interface QueuedWebEnvelope {
   envelope: WebEnvelope;
   encodedBytes: number;
   eventCount: number;
+  sourceEnvelopes: number;
 }
 
 class WebEnvelopeValidationError extends Error {
@@ -108,6 +117,9 @@ class StaleWebEventStreamError extends Error {
 }
 
 const WEB_EVENT_APPLY_CHUNK_SIZE = 100;
+const WEB_INBOUND_BATCH_MAX_EVENTS = 500;
+const WEB_INBOUND_BATCH_MAX_BYTES = 4 << 20;
+const WEB_INBOUND_BATCH_DELAY_MS = 8;
 const WEB_INBOUND_MAX_EVENTS = 8192;
 const WEB_INBOUND_MAX_BYTES = 16 << 20;
 const UTF8_ENCODER = new TextEncoder();
@@ -147,6 +159,24 @@ function envelopeEventCount(message: WebEnvelope): number {
   return Array.isArray(message?.events) ? message.events.length : 0;
 }
 
+function rawEventRange(
+  message: WebEnvelope,
+): { from: number; to: number } | null {
+  if (message.type !== "events") return null;
+  const from = message.fromSequence ?? message.sequence;
+  const to = message.toSequence ?? message.sequence;
+  if (
+    !Number.isSafeInteger(from) ||
+    !Number.isSafeInteger(to) ||
+    (from ?? 0) <= 0 ||
+    (to ?? 0) < (from ?? 0) ||
+    (message.sequence !== undefined && message.sequence !== to)
+  ) {
+    return null;
+  }
+  return { from: from!, to: to! };
+}
+
 interface ErrorResponse {
   error?: { code?: string; message?: string; requestId?: string };
 }
@@ -184,6 +214,7 @@ export class WebTransport implements PraetorTransport {
   private revision = 0;
   private serverId = "";
   private sequence = 0;
+  private canResume = false;
   private socket: WebSocket | null = null;
   private handlers = new Set<TransportHandlers>();
   private started = false;
@@ -199,6 +230,9 @@ export class WebTransport implements PraetorTransport {
   private inboundQueuedEvents = 0;
   private inboundQueuedBytes = 0;
   private inboundProcessing = false;
+  private inboundDrainTimer: ReturnType<typeof setTimeout> | null = null;
+  private renderMeasurementPending = false;
+  private renderMeasurementAppliedAt = 0;
   private localClose: {
     epoch: number;
     category: WebEventStreamFailureCategory;
@@ -485,6 +519,11 @@ export class WebTransport implements PraetorTransport {
     ) {
       throw new Error("Invalid Praetor web bootstrap");
     }
+    if (this.serverId && this.serverId !== init.serverId) {
+      // A different server process cannot resume this browser's sequence.
+      this.sequence = 0;
+      this.canResume = false;
+    }
     this.csrf = init.csrf;
     this.revision = init.configRevision;
     this.serverId = init.serverId;
@@ -494,8 +533,13 @@ export class WebTransport implements PraetorTransport {
   private openSocket() {
     if (!this.started || this.socket || !this.csrf) return;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const query = new URLSearchParams({ sequence_ranges: "1" });
+    if (this.canResume && this.serverId) {
+      query.set("resume_server_id", this.serverId);
+      query.set("after_sequence", String(this.sequence));
+    }
     const socket = new WebSocket(
-      `${scheme}//${location.host}/api/v1/events?sequence_ranges=1`,
+      `${scheme}//${location.host}/api/v1/events?${query.toString()}`,
     );
     const epoch = ++this.streamEpoch;
     this.socket = socket;
@@ -543,6 +587,7 @@ export class WebTransport implements PraetorTransport {
       envelope: message,
       encodedBytes,
       eventCount: envelopeEventCount(message),
+      sourceEnvelopes: 1,
     });
   }
 
@@ -652,10 +697,20 @@ export class WebTransport implements PraetorTransport {
       this.inboundQueuedEvents += item.eventCount;
       this.inboundQueuedBytes += item.encodedBytes;
     }
-    void this.drainInboundQueue();
+    this.scheduleInboundDrain();
+  }
+
+  private scheduleInboundDrain() {
+    if (this.inboundProcessing || this.inboundDrainTimer) return;
+    this.inboundDrainTimer = setTimeout(() => {
+      this.inboundDrainTimer = null;
+      void this.drainInboundQueue();
+    }, WEB_INBOUND_BATCH_DELAY_MS);
   }
 
   private clearInboundQueue() {
+    if (this.inboundDrainTimer) clearTimeout(this.inboundDrainTimer);
+    this.inboundDrainTimer = null;
     this.inboundQueue = [];
     this.inboundQueuedEvents = 0;
     this.inboundQueuedBytes = 0;
@@ -687,16 +742,65 @@ export class WebTransport implements PraetorTransport {
     );
   }
 
+  private dequeueInboundGroup(): QueuedWebEnvelope {
+    const first = this.inboundQueue.shift()!;
+    if (first.envelope.type !== "events") return first;
+    const firstRange = rawEventRange(first.envelope);
+    if (!firstRange) return first;
+
+    let result = first;
+    while (this.inboundQueue.length > 0) {
+      const next = this.inboundQueue[0];
+      const nextRange = rawEventRange(next.envelope);
+      const resultRange = rawEventRange(result.envelope)!;
+      if (
+        next.envelope.type !== "events" ||
+        !nextRange ||
+        next.socket !== result.socket ||
+        next.epoch !== result.epoch ||
+        next.envelope.protocol !== result.envelope.protocol ||
+        next.envelope.serverId !== result.envelope.serverId ||
+        nextRange.from !== resultRange.to + 1 ||
+        result.eventCount + next.eventCount > WEB_INBOUND_BATCH_MAX_EVENTS ||
+        result.encodedBytes + next.encodedBytes > WEB_INBOUND_BATCH_MAX_BYTES
+      ) break;
+
+      this.inboundQueue.shift();
+      const events = [
+        ...(result.envelope.events ?? []),
+        ...(next.envelope.events ?? []),
+      ];
+      result = {
+        ...result,
+        envelope: {
+          ...result.envelope,
+          sequence: nextRange.to,
+          fromSequence: firstRange.from,
+          toSequence: nextRange.to,
+          events,
+        },
+        encodedBytes: result.encodedBytes + next.encodedBytes,
+        eventCount: result.eventCount + next.eventCount,
+        sourceEnvelopes: result.sourceEnvelopes + next.sourceEnvelopes,
+      };
+    }
+    return result;
+  }
+
   private async drainInboundQueue() {
     if (this.inboundProcessing) return;
     this.inboundProcessing = true;
     try {
       while (this.inboundQueue.length > 0) {
-        const item = this.inboundQueue.shift()!;
+        const item = this.dequeueInboundGroup();
         let stop = false;
         try {
           if (item.epoch !== this.streamEpoch || this.socket !== item.socket) continue;
-          await this.handleEnvelope(item.envelope, item.epoch);
+          await this.handleEnvelope(
+            item.envelope,
+            item.epoch,
+            item.sourceEnvelopes,
+          );
         } catch (error) {
           if (error instanceof StaleWebEventStreamError) continue;
           let category: WebEventStreamFailureCategory = "protocol_validation_failure";
@@ -728,7 +832,7 @@ export class WebTransport implements PraetorTransport {
       this.inboundProcessing = false;
       // An onmessage callback can append after the loop's final length check but
       // before the flag is lowered. Re-check once so that work cannot strand.
-      if (this.inboundQueue.length > 0) void this.drainInboundQueue();
+      if (this.inboundQueue.length > 0) this.scheduleInboundDrain();
     }
   }
 
@@ -747,6 +851,7 @@ export class WebTransport implements PraetorTransport {
     }
     if (![
       "snapshot",
+      "resume",
       "events",
       "config",
       "modes",
@@ -817,19 +922,36 @@ export class WebTransport implements PraetorTransport {
     // Handler return measures state mutation, not the Svelte flush or output
     // layout that follows it. Observe those asynchronously so diagnostics cover
     // the complete browser path without adding a frame delay to delivery.
+    if (this.renderMeasurementPending) {
+      this.renderMeasurementAppliedAt = Math.min(
+        this.renderMeasurementAppliedAt,
+        appliedAt,
+      );
+      return;
+    }
+    this.renderMeasurementPending = true;
+    this.renderMeasurementAppliedAt = appliedAt;
     void tick().then(() => {
-      if (epoch !== undefined && epoch !== this.streamEpoch) return;
+      if (epoch !== undefined && epoch !== this.streamEpoch) {
+        this.renderMeasurementPending = false;
+        return;
+      }
+      const measuredFrom = this.renderMeasurementAppliedAt;
       const reconciledAt = monotonicNow();
       this.streamDiagnostics.reconciliationSamples++;
       this.streamDiagnostics.maxReconciliationMilliseconds = Math.max(
         this.streamDiagnostics.maxReconciliationMilliseconds,
-        reconciledAt - appliedAt,
+        reconciledAt - measuredFrom,
       );
       if (
         typeof requestAnimationFrame !== "function" ||
         typeof document === "undefined"
-      ) return;
+      ) {
+        this.renderMeasurementPending = false;
+        return;
+      }
       requestAnimationFrame(() => {
+        this.renderMeasurementPending = false;
         if (epoch !== undefined && epoch !== this.streamEpoch) return;
         const content = document.querySelector<HTMLElement>(".output .content");
         if (!content) return;
@@ -839,7 +961,7 @@ export class WebTransport implements PraetorTransport {
         this.streamDiagnostics.outputPaneRenderSamples++;
         this.streamDiagnostics.maxOutputPaneRenderMilliseconds = Math.max(
           this.streamDiagnostics.maxOutputPaneRenderMilliseconds,
-          monotonicNow() - appliedAt,
+          monotonicNow() - measuredFrom,
         );
       });
     });
@@ -878,7 +1000,11 @@ export class WebTransport implements PraetorTransport {
     }
   }
 
-  private async handleEnvelope(message: WebEnvelope, epoch?: number) {
+  private async handleEnvelope(
+    message: WebEnvelope,
+    epoch?: number,
+    sourceEnvelopes = 1,
+  ) {
     const started = monotonicNow();
     this.ensureCurrentEpoch(epoch);
     this.validateProtocol(message);
@@ -918,6 +1044,7 @@ export class WebTransport implements PraetorTransport {
       this.ensureCurrentEpoch(epoch);
       this.serverId = message.serverId;
       this.sequence = snapshotSequence;
+      this.canResume = true;
       this.socketReady = true;
       this.invokeEventHandler(() => this.emitSystem({
         type: "transport",
@@ -925,6 +1052,30 @@ export class WebTransport implements PraetorTransport {
       }));
       this.streamDiagnostics.appliedEnvelopes++;
       this.streamDiagnostics.appliedEvents += message.events?.length ?? 0;
+      this.streamDiagnostics.maxApplicationMilliseconds = Math.max(
+        this.streamDiagnostics.maxApplicationMilliseconds,
+        monotonicNow() - started,
+      );
+      return;
+    }
+    if (message.type === "resume") {
+      const resumeSequence = message.sequence ?? 0;
+      if (
+        !this.canResume ||
+        message.serverId !== this.serverId ||
+        !Number.isSafeInteger(resumeSequence) ||
+        resumeSequence !== this.sequence
+      ) {
+        throw new WebSequenceGapError(
+          "Praetor event resumption did not match the retained browser state",
+        );
+      }
+      this.socketReady = true;
+      this.invokeEventHandler(() => this.emitSystem({
+        type: "transport",
+        transportState: "connected",
+      }));
+      this.streamDiagnostics.appliedEnvelopes += sourceEnvelopes;
       this.streamDiagnostics.maxApplicationMilliseconds = Math.max(
         this.streamDiagnostics.maxApplicationMilliseconds,
         monotonicNow() - started,
@@ -972,7 +1123,7 @@ export class WebTransport implements PraetorTransport {
     }
     this.ensureCurrentEpoch(epoch);
     this.sequence = range.to;
-    this.streamDiagnostics.appliedEnvelopes++;
+    this.streamDiagnostics.appliedEnvelopes += sourceEnvelopes;
     this.streamDiagnostics.appliedEvents += message.events?.length ?? 0;
     this.streamDiagnostics.maxApplicationMilliseconds = Math.max(
       this.streamDiagnostics.maxApplicationMilliseconds,
@@ -1172,6 +1323,7 @@ export class WebTransport implements PraetorTransport {
     this.csrf = "";
     this.serverId = "";
     this.sequence = 0;
+    this.canResume = false;
     this.socketReady = false;
     this.csrfRefresh = null;
     if (!this.authExpired) {

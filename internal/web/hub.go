@@ -22,6 +22,9 @@ type Hub struct {
 	projector       *Projection
 	clients         map[uint64]*eventSubscriber
 	stream          eventStreamCounters
+	journal         []resumeJournalEntry
+	journalEvents   int
+	journalBytes    int
 	closed          bool
 	observer        func([]appgui.WireEvent)
 	config          json.RawMessage
@@ -101,6 +104,18 @@ func (h *Hub) Subscribe() (Subscription, Envelope) {
 func (h *Hub) SubscribeWithSequenceRanges(
 	sequenceRanges bool,
 ) (Subscription, Envelope) {
+	return h.SubscribeWithResume(sequenceRanges, "", 0)
+}
+
+// SubscribeWithResume atomically registers a browser and, when its server
+// identity and last committed sequence are still covered by the bounded
+// journal, queues only the missing envelopes. A late join or an expired gap
+// receives the ordinary authoritative snapshot.
+func (h *Hub) SubscribeWithResume(
+	sequenceRanges bool,
+	resumeServerID string,
+	afterSequence uint64,
+) (Subscription, Envelope) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed || len(h.clients) >= maxSubscribers {
@@ -117,7 +132,39 @@ func (h *Hub) SubscribeWithSequenceRanges(
 	}
 	h.clients[id] = client
 	h.stream.created++
-	snapshot := Envelope{
+	initial := h.snapshotLocked()
+	if resumeServerID != "" {
+		if entries, ok := h.resumeEntriesLocked(resumeServerID, afterSequence); ok {
+			initial = Envelope{
+				Type:     "resume",
+				Protocol: ProtocolVersion,
+				ServerID: h.serverID,
+				Sequence: afterSequence,
+			}
+			for _, entry := range entries {
+				// resumeEntriesLocked preflights the exact retained byte/event
+				// totals, so enqueue cannot cross the per-subscriber hard bound.
+				h.enqueueLocked(client, entry.envelope, entry.estimatedBytes)
+			}
+			h.stream.resumedSubscriptions++
+		} else {
+			h.stream.resumeFallbacks++
+			h.stream.snapshotSubscriptions++
+		}
+	} else {
+		h.stream.snapshotSubscriptions++
+	}
+	return Subscription{
+		ID:         id,
+		Ready:      client.ready,
+		Closed:     client.closed,
+		hub:        h,
+		subscriber: client,
+	}, initial
+}
+
+func (h *Hub) snapshotLocked() Envelope {
+	return Envelope{
 		Type:            "snapshot",
 		Protocol:        ProtocolVersion,
 		ServerID:        h.serverID,
@@ -130,13 +177,6 @@ func (h *Hub) SubscribeWithSequenceRanges(
 		CredentialStore: cloneCredentialStoreStatus(h.credentialStore),
 		CommandHistory:  commandHistoryUpdatePointer(h.commandHistory.snapshot()),
 	}
-	return Subscription{
-		ID:         id,
-		Ready:      client.ready,
-		Closed:     client.closed,
-		hub:        h,
-		subscriber: client,
-	}, snapshot
 }
 
 // LookupTypedCommand returns a previously committed browser-scoped submission
@@ -241,6 +281,12 @@ func (h *Hub) Close() {
 	for _, client := range h.clients {
 		h.removeSubscriberLocked(client, eventStreamCloseHubShutdown)
 	}
+	for index := range h.journal {
+		h.journal[index] = resumeJournalEntry{}
+	}
+	h.journal = nil
+	h.journalEvents = 0
+	h.journalBytes = 0
 }
 
 func (h *Hub) SetInitialState(config json.RawMessage, revision uint64, modeNames, accounts []string, credentialStore appgui.CredentialStoreStatus) {
@@ -289,6 +335,8 @@ func (h *Hub) broadcastLocked(env Envelope) {
 	estimatedBytes, encoded := encodedEnvelopeSize(env)
 	if !encoded {
 		h.stream.encodingFailures++
+	} else {
+		h.appendResumeJournalLocked(env, estimatedBytes)
 	}
 	for _, client := range h.clients {
 		h.enqueueLocked(client, env, estimatedBytes)

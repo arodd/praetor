@@ -18,6 +18,9 @@ const (
 	subscriberBacklogMaxBytes            = 8 << 20
 	subscriberCoalescedEnvelopeMaxEvents = 1024
 	subscriberCoalescedEnvelopeMaxBytes  = 1 << 20
+	resumeJournalMaxEnvelopes            = 8192
+	resumeJournalMaxEvents               = 8192
+	resumeJournalMaxBytes                = 32 << 20
 	eventStreamSlowWriteDiagnostic       = 100 * time.Millisecond
 	eventStreamCloseSubscriberHardLimit  = "subscriber_backlog_hard_limit"
 	eventStreamCloseClientUnsubscribe    = "client_unsubscribe"
@@ -72,14 +75,17 @@ type eventSubscriber struct {
 }
 
 type eventStreamCounters struct {
-	created            uint64
-	removed            uint64
-	hardLimitEvictions uint64
-	coalescedEnvelopes uint64
-	encodingFailures   uint64
-	writes             uint64
-	writeErrors        uint64
-	maxWriteDuration   time.Duration
+	created               uint64
+	removed               uint64
+	hardLimitEvictions    uint64
+	coalescedEnvelopes    uint64
+	encodingFailures      uint64
+	writes                uint64
+	writeErrors           uint64
+	maxWriteDuration      time.Duration
+	snapshotSubscriptions uint64
+	resumedSubscriptions  uint64
+	resumeFallbacks       uint64
 }
 
 // EventStreamLimits reports the server-owned delivery bounds. They are
@@ -91,6 +97,9 @@ type EventStreamLimits struct {
 	MaxBacklogBytes    int `json:"maxBacklogBytes"`
 	MaxCoalescedEvents int `json:"maxCoalescedEvents"`
 	MaxCoalescedBytes  int `json:"maxCoalescedBytes"`
+	MaxResumeEnvelopes int `json:"maxResumeEnvelopes"`
+	MaxResumeEvents    int `json:"maxResumeEvents"`
+	MaxResumeBytes     int `json:"maxResumeBytes"`
 }
 
 // EventSubscriberDiagnostics contains bounded operational counters only. It
@@ -127,17 +136,25 @@ type EventSubscriberDiagnostics struct {
 }
 
 type EventStreamDiagnostics struct {
-	Limits               EventStreamLimits            `json:"limits"`
-	ActiveSubscribers    int                          `json:"activeSubscribers"`
-	Created              uint64                       `json:"created"`
-	Removed              uint64                       `json:"removed"`
-	HardLimitEvictions   uint64                       `json:"hardLimitEvictions"`
-	CoalescedEnvelopes   uint64                       `json:"coalescedEnvelopes"`
-	EncodingFailures     uint64                       `json:"encodingFailures"`
-	Writes               uint64                       `json:"writes"`
-	WriteErrors          uint64                       `json:"writeErrors"`
-	MaxWriteMilliseconds int64                        `json:"maxWriteMilliseconds"`
-	Subscribers          []EventSubscriberDiagnostics `json:"subscribers"`
+	Limits                 EventStreamLimits            `json:"limits"`
+	ActiveSubscribers      int                          `json:"activeSubscribers"`
+	Created                uint64                       `json:"created"`
+	Removed                uint64                       `json:"removed"`
+	HardLimitEvictions     uint64                       `json:"hardLimitEvictions"`
+	CoalescedEnvelopes     uint64                       `json:"coalescedEnvelopes"`
+	EncodingFailures       uint64                       `json:"encodingFailures"`
+	Writes                 uint64                       `json:"writes"`
+	WriteErrors            uint64                       `json:"writeErrors"`
+	MaxWriteMilliseconds   int64                        `json:"maxWriteMilliseconds"`
+	SnapshotSubscriptions  uint64                       `json:"snapshotSubscriptions"`
+	ResumedSubscriptions   uint64                       `json:"resumedSubscriptions"`
+	ResumeFallbacks        uint64                       `json:"resumeFallbacks"`
+	ResumeJournalEnvelopes int                          `json:"resumeJournalEnvelopes"`
+	ResumeJournalEvents    int                          `json:"resumeJournalEvents"`
+	ResumeJournalBytes     int                          `json:"resumeJournalBytes"`
+	ResumeJournalOldest    uint64                       `json:"resumeJournalOldestSequence,omitempty"`
+	ResumeJournalNewest    uint64                       `json:"resumeJournalNewestSequence,omitempty"`
+	Subscribers            []EventSubscriberDiagnostics `json:"subscribers"`
 }
 
 // Subscription exposes level-triggered readiness instead of a fixed Go
@@ -238,6 +255,9 @@ func eventStreamLimits() EventStreamLimits {
 		MaxBacklogBytes:    subscriberBacklogMaxBytes,
 		MaxCoalescedEvents: subscriberCoalescedEnvelopeMaxEvents,
 		MaxCoalescedBytes:  subscriberCoalescedEnvelopeMaxBytes,
+		MaxResumeEnvelopes: resumeJournalMaxEnvelopes,
+		MaxResumeEvents:    resumeJournalMaxEvents,
+		MaxResumeBytes:     resumeJournalMaxBytes,
 	}
 }
 
@@ -283,17 +303,27 @@ func (h *Hub) Diagnostics() EventStreamDiagnostics {
 	defer h.mu.Unlock()
 	now := time.Now()
 	result := EventStreamDiagnostics{
-		Limits:               eventStreamLimits(),
-		ActiveSubscribers:    len(h.clients),
-		Created:              h.stream.created,
-		Removed:              h.stream.removed,
-		HardLimitEvictions:   h.stream.hardLimitEvictions,
-		CoalescedEnvelopes:   h.stream.coalescedEnvelopes,
-		EncodingFailures:     h.stream.encodingFailures,
-		Writes:               h.stream.writes,
-		WriteErrors:          h.stream.writeErrors,
-		MaxWriteMilliseconds: h.stream.maxWriteDuration.Milliseconds(),
-		Subscribers:          make([]EventSubscriberDiagnostics, 0, len(h.clients)),
+		Limits:                 eventStreamLimits(),
+		ActiveSubscribers:      len(h.clients),
+		Created:                h.stream.created,
+		Removed:                h.stream.removed,
+		HardLimitEvictions:     h.stream.hardLimitEvictions,
+		CoalescedEnvelopes:     h.stream.coalescedEnvelopes,
+		EncodingFailures:       h.stream.encodingFailures,
+		Writes:                 h.stream.writes,
+		WriteErrors:            h.stream.writeErrors,
+		MaxWriteMilliseconds:   h.stream.maxWriteDuration.Milliseconds(),
+		SnapshotSubscriptions:  h.stream.snapshotSubscriptions,
+		ResumedSubscriptions:   h.stream.resumedSubscriptions,
+		ResumeFallbacks:        h.stream.resumeFallbacks,
+		ResumeJournalEnvelopes: len(h.journal),
+		ResumeJournalEvents:    h.journalEvents,
+		ResumeJournalBytes:     h.journalBytes,
+		Subscribers:            make([]EventSubscriberDiagnostics, 0, len(h.clients)),
+	}
+	if len(h.journal) > 0 {
+		result.ResumeJournalOldest = h.journal[0].envelope.Sequence
+		result.ResumeJournalNewest = h.journal[len(h.journal)-1].envelope.Sequence
 	}
 	for _, client := range h.clients {
 		result.Subscribers = append(result.Subscribers, subscriberDiagnostics(client, now))

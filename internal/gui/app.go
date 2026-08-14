@@ -54,6 +54,14 @@ type GuiApp struct {
 	playRand  func(min, max time.Duration) time.Duration
 	// playCheck overrides the pre-flight guard in tests; nil means the real check.
 	playCheck func() error
+
+	// lastStatus is the last semantic status projection delivered to a GUI.
+	// The core emits a StatusUpdateEvent after every parsed game line, even when
+	// only the wall-clock duration of the active metric session changed. Keeping
+	// that derivative value out of the browser stream avoids serializing the
+	// complete metrics history hundreds of times during large responses such as
+	// inventory. processBatch is single-threaded, so this cache needs no lock.
+	lastStatus *StatusPayload
 }
 
 // NewGuiApp constructs the facade around bootstrapped Deps and an Emitter.
@@ -198,6 +206,7 @@ func (a *GuiApp) processBatch(batch []types.Event) {
 			// starts fresh. This lives here (not in GuiApp.Disconnect) so it covers
 			// every disconnect cause — Disconnect() only runs on user logout.
 			a.render.reset()
+			a.lastStatus = nil
 			a.mu.Lock()
 			a.kudosPromptShown = false
 			a.mu.Unlock()
@@ -211,7 +220,21 @@ func (a *GuiApp) processBatch(batch []types.Event) {
 			ev = withColorWords(ev)
 		}
 
-		// Convert the event itself (SKOOT bars, text, status, conn, etc.).
+		// StatusUpdateEvent contains the complete metrics history. The core emits
+		// one after every non-empty game line, but the frontend already advances
+		// the active session duration from its start time. Suppress semantically
+		// identical copies here, before either Wails or the web hub serializes them.
+		if status, ok := ev.(types.StatusUpdateEvent); ok {
+			payload := toStatusPayload(status)
+			if statusPayloadEqual(a.lastStatus, payload) {
+				continue
+			}
+			a.lastStatus = cloneStatusPayload(payload)
+			wire = append(wire, WireEvent{Kind: KindStatus, Status: payload})
+			continue
+		}
+
+		// Convert the event itself (SKOOT bars, text, conn, etc.).
 		if w, ok := toWire(ev); ok {
 			wire = append(wire, w)
 		}

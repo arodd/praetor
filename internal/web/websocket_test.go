@@ -185,6 +185,72 @@ func TestEventWebSocketSnapshotThenLiveEvents(t *testing.T) {
 	}
 }
 
+func TestEventWebSocketReconnectResumesWithoutScrollbackSnapshot(t *testing.T) {
+	srv, handler := newTestServer(t)
+	cookie, _ := loginRequest(t, handler)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+	baseURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") +
+		"/api/v1/events?sequence_ranges=1"
+	dial := func(url string) *websocket.Conn {
+		conn, response, err := websocket.DefaultDialer.Dial(url, http.Header{
+			"Origin": []string{httpServer.URL},
+			"Cookie": []string{cookie.String()},
+		})
+		if err != nil {
+			t.Fatalf("dial response=%#v: %v", response, err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		return conn
+	}
+	read := func(conn *websocket.Conn) Envelope {
+		var envelope Envelope
+		if err := conn.ReadJSON(&envelope); err != nil {
+			t.Fatalf("read envelope: %v", err)
+		}
+		return envelope
+	}
+
+	first := dial(baseURL)
+	snapshot := read(first)
+	if snapshot.Type != "snapshot" || snapshot.Sequence != 0 {
+		t.Fatalf("initial snapshot = %#v", snapshot)
+	}
+	srv.hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(1, 0)})
+	if live := read(first); live.Sequence != 1 {
+		t.Fatalf("first live envelope = %#v", live)
+	}
+	_ = first.Close()
+	srv.hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(2, 0)})
+	srv.hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(3, 0)})
+
+	resumeURL := fmt.Sprintf(
+		"%s&resume_server_id=%s&after_sequence=1",
+		baseURL,
+		snapshot.ServerID,
+	)
+	second := dial(resumeURL)
+	defer second.Close()
+	if initial := read(second); initial.Type != "resume" || initial.Sequence != 1 ||
+		len(initial.Events) != 0 {
+		t.Fatalf("resume handshake = %#v", initial)
+	}
+	sequence := uint64(1)
+	var resumed []appgui.WireEvent
+	for sequence < 3 {
+		envelope := read(second)
+		if envelope.Type != "events" || envelope.FromSequence != sequence+1 {
+			t.Fatalf("resumed envelope after %d = %#v", sequence, envelope)
+		}
+		resumed = append(resumed, envelope.Events...)
+		sequence = envelope.ToSequence
+	}
+	if len(resumed) != 2 || resumed[0].Text.Text != "inventory line 0002" ||
+		resumed[1].Text.Text != "inventory line 0003" {
+		t.Fatalf("resumed events = %#v", resumed)
+	}
+}
+
 func TestTwoWebSocketClientsConvergeAcrossLateJoin(t *testing.T) {
 	srv, handler := newTestServer(t)
 	cookieA, _ := loginRequest(t, handler)

@@ -131,6 +131,62 @@ func toStatusPayload(e types.StatusUpdateEvent) *StatusPayload {
 	return p
 }
 
+// statusPayloadEqual compares the authoritative status fields. DurationMs is
+// deliberately omitted: it is derived from Start/End, and an active session's
+// value changes merely because another line happened to arrive. The frontend
+// owns its display clock for active sessions.
+func statusPayloadEqual(left, right *StatusPayload) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	if left.Mode != right.Mode ||
+		!metricSessionEqual(left.Current, right.Current) ||
+		len(left.History) != len(right.History) {
+		return false
+	}
+	for index := range left.History {
+		if !metricSessionEqual(&left.History[index], &right.History[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func metricSessionEqual(left, right *MetricSession) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	if left.Mode != right.Mode || left.Start != right.Start ||
+		left.End != right.End || len(left.Entries) != len(right.Entries) {
+		return false
+	}
+	for index := range left.Entries {
+		if left.Entries[index] != right.Entries[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneStatusPayload(source *StatusPayload) *StatusPayload {
+	if source == nil {
+		return nil
+	}
+	result := *source
+	if source.Current != nil {
+		current := *source.Current
+		current.Entries = append([]MetricEntry(nil), source.Current.Entries...)
+		result.Current = &current
+	}
+	result.History = append([]MetricSession(nil), source.History...)
+	for index := range result.History {
+		result.History[index].Entries = append(
+			[]MetricEntry(nil), source.History[index].Entries...,
+		)
+	}
+	return &result
+}
+
 func toMetricSession(m types.MetricSnapshot) *MetricSession {
 	out := &MetricSession{
 		Mode:       m.Mode,

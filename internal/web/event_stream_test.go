@@ -366,3 +366,93 @@ func TestHubDoesNotCoalesceAcrossAuthoritativeState(t *testing.T) {
 		}
 	}
 }
+
+func TestHubResumeReplaysOnlyMissingContiguousEnvelopes(t *testing.T) {
+	hub := NewHub(100)
+	for index := 1; index <= 2; index++ {
+		hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(index, 0)})
+	}
+	serverID := hub.ServerID()
+	for index := 3; index <= 5; index++ {
+		hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(index, 0)})
+	}
+
+	subscription, initial := hub.SubscribeWithResume(true, serverID, 2)
+	defer hub.Unsubscribe(subscription.ID)
+	if initial.Type != "resume" || initial.Sequence != 2 || len(initial.Events) != 0 {
+		t.Fatalf("resume handshake = %#v", initial)
+	}
+	events := drainEventSubscription(t, subscription, 2, 5)
+	if len(events) != 3 {
+		t.Fatalf("resumed events = %d, want 3", len(events))
+	}
+	for index, event := range events {
+		want := fmt.Sprintf("inventory line %04d", index+3)
+		if event.Text == nil || event.Text.Text != want {
+			t.Fatalf("resumed event %d = %#v, want %q", index, event, want)
+		}
+	}
+	diagnostics := hub.Diagnostics()
+	if diagnostics.ResumedSubscriptions != 1 ||
+		diagnostics.SnapshotSubscriptions != 0 ||
+		diagnostics.ResumeFallbacks != 0 {
+		t.Fatalf("resume diagnostics = %+v", diagnostics)
+	}
+}
+
+func TestHubResumePreservesAuthoritativeStateBarriers(t *testing.T) {
+	hub := NewHub(100)
+	hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(1, 0)})
+	after := uint64(1)
+	hub.BroadcastState(Envelope{
+		Type:     "config",
+		Config:   json.RawMessage(`{"UI":{"font_size":11}}`),
+		Revision: 7,
+	})
+	hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(2, 0)})
+
+	subscription, initial := hub.SubscribeWithResume(
+		true,
+		hub.ServerID(),
+		after,
+	)
+	defer hub.Unsubscribe(subscription.ID)
+	if initial.Type != "resume" || initial.Sequence != after {
+		t.Fatalf("resume handshake = %#v", initial)
+	}
+	configEnvelope := receiveSubscription(t, subscription)
+	if configEnvelope.Type != "config" || configEnvelope.Sequence != 2 ||
+		configEnvelope.Revision != 7 {
+		t.Fatalf("resumed config barrier = %#v", configEnvelope)
+	}
+	eventEnvelope := receiveSubscription(t, subscription)
+	if eventEnvelope.Type != "events" || eventEnvelope.Sequence != 3 ||
+		len(eventEnvelope.Events) != 1 {
+		t.Fatalf("event after resumed config = %#v", eventEnvelope)
+	}
+}
+
+func TestHubResumeFallsBackToSnapshotWhenGapExpiredOrServerChanged(t *testing.T) {
+	hub := NewHub(10)
+	hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(0, 0)})
+	serverID := hub.ServerID()
+	for index := 1; index <= resumeJournalMaxEvents+1; index++ {
+		hub.Emit(appgui.EventChannel, []appgui.WireEvent{inventoryEvent(index, 0)})
+	}
+
+	expired, initial := hub.SubscribeWithResume(true, serverID, 1)
+	defer hub.Unsubscribe(expired.ID)
+	if initial.Type != "snapshot" || initial.Sequence != uint64(resumeJournalMaxEvents+2) {
+		t.Fatalf("expired resume initial = %#v", initial)
+	}
+
+	changed, changedInitial := hub.SubscribeWithResume(true, "different-server", hub.sequence)
+	defer hub.Unsubscribe(changed.ID)
+	if changedInitial.Type != "snapshot" {
+		t.Fatalf("changed-server resume initial = %#v", changedInitial)
+	}
+	diagnostics := hub.Diagnostics()
+	if diagnostics.ResumeFallbacks != 2 || diagnostics.SnapshotSubscriptions != 2 {
+		t.Fatalf("fallback diagnostics = %+v", diagnostics)
+	}
+}
