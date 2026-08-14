@@ -1,7 +1,10 @@
 package protocol
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/cyber-godzilla/praetor/internal/types"
 )
 
 func TestParseHTML_PlainText(t *testing.T) {
@@ -277,6 +280,85 @@ func TestParseHTML_HTMLEntities(t *testing.T) {
 	}
 }
 
+func TestParseHTML_InventoryTablePreservesRowsAndCells(t *testing.T) {
+	input := `<table class="captionleft"><caption>You are carrying:</caption><tbody>` +
+		`<tr><td>a long backpack</td><td>Approx. 55 lbs</td></tr>` +
+		`<tr><td>a food ration</td><td>Less than a pound.</td></tr>` +
+		`</tbody></table></font>`
+	want := "You are carrying:\n" +
+		"a long backpack  Approx. 55 lbs\n" +
+		"a food ration  Less than a pound."
+
+	result := ParseHTML(input)
+	if result.Text != want {
+		t.Fatalf("inventory table text:\nwant %q\n got %q", want, result.Text)
+	}
+	if got := segmentText(result.Segments); got != want {
+		t.Fatalf("inventory table segments:\nwant %q\n got %q", want, got)
+	}
+	if strings.HasSuffix(result.Text, "\n") {
+		t.Fatal("inventory table added a trailing blank row")
+	}
+}
+
+func TestParseHTML_AttributeTablePreservesHeaderAndRows(t *testing.T) {
+	input := `<table class="generictable"><tbody>` +
+		`<tr><th>Attribute</th><th>Description</th><th>Modified Value</th>` +
+		`<th>Base Value</th><th>Potential</th></tr>` +
+		`<tr><td>Agility</td><td>Good</td><td>141</td><td>135</td><td>0</td></tr>` +
+		`<tr><td>Charisma</td><td>Below average</td><td>72</td><td>121</td><td>10</td></tr>` +
+		`</tbody></table></font>`
+	want := "Attribute  Description  Modified Value  Base Value  Potential\n" +
+		"Agility  Good  141  135  0\n" +
+		"Charisma  Below average  72  121  10"
+
+	result := ParseHTML(input)
+	if result.Text != want {
+		t.Fatalf("attribute table text:\nwant %q\n got %q", want, result.Text)
+	}
+	if got := segmentText(result.Segments); got != want {
+		t.Fatalf("attribute table segments:\nwant %q\n got %q", want, got)
+	}
+	for _, heading := range []string{
+		"Attribute", "Description", "Modified Value", "Base Value", "Potential",
+	} {
+		found := false
+		for _, segment := range result.Segments {
+			if segment.Text == heading && segment.Bold {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("table heading %q was not preserved as bold", heading)
+		}
+	}
+}
+
+func TestParseHTML_TableSeparatesSurroundingTextWithoutTrailingBreak(t *testing.T) {
+	result := ParseHTML(`before<table><tbody><tr><td>cell</td></tr></tbody></table>after`)
+	want := "before\ncell\nafter"
+	if result.Text != want {
+		t.Fatalf("table block text = %q, want %q", result.Text, want)
+	}
+	if got := segmentText(result.Segments); got != want {
+		t.Fatalf("table block segments = %q, want %q", got, want)
+	}
+
+	tableOnly := ParseHTML(`<table><tr><td>cell</td></tr></table>`)
+	if tableOnly.Text != "cell" {
+		t.Fatalf("table-only text = %q, want no trailing newline", tableOnly.Text)
+	}
+}
+
+func segmentText(segments []types.StyledSegment) string {
+	var text strings.Builder
+	for _, segment := range segments {
+		text.WriteString(segment.Text)
+	}
+	return text.String()
+}
+
 // TestParseHTML_NearBlackFontColorNoPanic is a regression guard: a <font color>
 // whose weighted brightness rounds to 0 under integer division (but is not pure
 // black) drove brightness to 0 → scale = 50/0 = +Inf → int(NaN) negative index
@@ -303,6 +385,7 @@ func FuzzParseHTML(f *testing.F) {
 	f.Add(`<b><i>nested`)
 	f.Add(`<font color="#zzzzzz">bad hex</font>`)
 	f.Add(`<hr/><ul><li>item`)
+	f.Add(`<table><tr><th>name</th><th>weight</th></tr><tr><td>item</td><td>1 lb</td></tr></table>`)
 	f.Add("&lt;entity&gt; &amp; &#x1F600;")
 	f.Fuzz(func(t *testing.T, s string) {
 		_ = ParseHTML(s)
