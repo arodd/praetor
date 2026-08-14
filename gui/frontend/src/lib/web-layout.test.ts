@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 // The production tsconfig intentionally omits Node types; Vitest supplies the
 // built-in at test time for these source-level responsive contracts.
-// @ts-expect-error node:fs types are test-runner-only
 import { readFileSync } from "node:fs";
 
 const source = (relative: string) =>

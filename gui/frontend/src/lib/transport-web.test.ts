@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 // The production tsconfig intentionally omits Node types; Vitest still runs in
 // Node and provides this built-in for the source-level parity contract.
-// @ts-expect-error node:fs types are test-runner-only
 import { readFileSync } from "node:fs";
 import { settingsOperations, WEB_SUPPORTED_METHODS, WebTransport } from "./transport-web";
 import { WebAuthRequiredError } from "./transport";
