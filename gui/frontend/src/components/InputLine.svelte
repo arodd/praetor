@@ -9,7 +9,7 @@
   import { isAllowedDuringPlay } from "../lib/playcmd";
   import type { PlayState } from "../lib/types";
   import CommandHint from "./CommandHint.svelte";
-  import { matchCommands } from "../lib/commands";
+  import { matchCommands, tabComplete } from "../lib/commands";
 
   let value = $state("");
   let inputEl: HTMLTextAreaElement;
@@ -35,6 +35,25 @@
       inputEl?.setSelectionRange(text.length, text.length);
     });
   }
+
+  // Mirror hint visibility for GameView's Tab routing. This must track the same
+  // condition the markup below uses — the history search takes the slot, so the
+  // hint is hidden while it runs. If the two disagree, Tab is swallowed with no
+  // hint on screen.
+  $effect(() => {
+    store.hintActive =
+      !store.histSearchActive && hintMatches.length > 0 && !store.openModal;
+  });
+
+  // GameView bumps this counter when Tab is pressed with the hint showing.
+  let lastHintReq = 0;
+  $effect(() => {
+    const req = store.hintCompleteRequest;
+    if (req === lastHintReq) return;
+    lastHintReq = req;
+    const next = tabComplete(value, hintMatches);
+    if (next !== null) applyCompletion(next);
+  });
 
   // Reverse history search (Ctrl+R), readline-style. Active state is mirrored
   // in store.histSearchActive so GameView's Escape routing can yield to it;
