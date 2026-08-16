@@ -18,7 +18,9 @@
 
   // Passive hint above the input. matchCommands returns [] for anything that is
   // not a slash command, so this is empty for ordinary game text.
-  const hintMatches = $derived(matchCommands(value, { playing: store.playActive }));
+  const hintMatches = $derived(
+    matchCommands(value, { playing: store.playActive, modes: store.modeSpecs }),
+  );
 
   // Reverse history search (Ctrl+R), readline-style. Active state is mirrored
   // in store.histSearchActive so GameView's Escape routing can yield to it;

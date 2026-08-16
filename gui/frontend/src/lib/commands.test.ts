@@ -151,3 +151,89 @@ describe("matchCommands", () => {
     );
   });
 });
+
+describe("matchCommands with mode specs", () => {
+  const MODES = [
+    { name: "disable", usage: "", desc: "", chains: false },
+    { name: "lock_job", usage: "<citizen|trader>", desc: "Run a lock job", chains: false },
+    { name: "locksmith", usage: "[skip:<n>]", desc: "Unjam containers", chains: true },
+    { name: "loot", usage: "<item> [corpse#]", desc: "Loot corpses", chains: true },
+    { name: "macro", usage: "[nokill]", desc: "Attack rotation", chains: false },
+  ];
+  const m = (input: string) => matchCommands(input, { modes: MODES });
+
+  it("offers every mode once the command is committed", () => {
+    expect(names(m("/mode "))).toEqual([
+      "/mode disable",
+      "/mode lock_job",
+      "/mode locksmith",
+      "/mode loot",
+      "/mode macro",
+    ]);
+  });
+
+  it("narrows the offer by mode-name prefix", () => {
+    expect(names(m("/mode lo"))).toEqual([
+      "/mode lock_job",
+      "/mode locksmith",
+      "/mode loot",
+    ]);
+  });
+
+  it("shows the resolved mode's own signature and description", () => {
+    const r = m("/mode macro");
+    expect(r).toHaveLength(1);
+    expect(r[0].name).toBe("/mode macro");
+    expect(r[0].args).toBe("[nokill]");
+    expect(r[0].desc).toBe("Attack rotation");
+  });
+
+  it("appends the after: token only for a chaining mode", () => {
+    expect(m("/mode loot")[0].args).toBe("<item> [corpse#] [after:<mode>]");
+    expect(m("/mode macro")[0].args).toBe("[nokill]");
+  });
+
+  it("shows after: alone when a chaining mode takes no other arguments", () => {
+    const chainOnly = [{ name: "idle", usage: "", desc: "Rest", chains: true }];
+    const r = matchCommands("/mode idle", { modes: chainOnly });
+    expect(r[0].args).toBe("[after:<mode>]");
+  });
+
+  it("keeps the resolved mode up while its arguments are typed", () => {
+    const r = m("/mode loot bronze|alanti");
+    expect(r).toHaveLength(1);
+    expect(r[0].name).toBe("/mode loot");
+  });
+
+  it("resolves the mode case-insensitively, like the core does", () => {
+    expect(names(m("/mode LOOT"))).toEqual(["/mode loot"]);
+  });
+
+  it("labels rows with the alias the user actually typed", () => {
+    expect(names(m("/sm loot"))).toEqual(["/sm loot"]);
+  });
+
+  it("falls back to the generic signature for an unknown mode", () => {
+    const r = m("/mode nosuchmode");
+    expect(names(r)).toEqual(["/mode"]);
+    expect(r[0].args).toBe("<name> [args…]");
+  });
+
+  it("offers an undeclared mode by name with nothing to promise", () => {
+    const r = m("/mode disable");
+    expect(names(r)).toEqual(["/mode disable"]);
+    expect(r[0].args).toBeUndefined();
+    expect(r[0].desc).toBe("");
+  });
+
+  it("leaves every other command untouched", () => {
+    expect(names(m("/loot"))).toEqual([]);
+    expect(names(m("/wiki foo"))).toEqual(["/wiki"]);
+    expect(names(m("/mo"))).toEqual(["/mode"]);
+  });
+
+  it("behaves exactly as before when no specs are loaded", () => {
+    expect(names(matchCommands("/mode loot"))).toEqual(["/mode"]);
+    expect(names(matchCommands("/mode loot", { modes: [] }))).toEqual(["/mode"]);
+  });
+});

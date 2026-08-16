@@ -8,6 +8,7 @@ import type {
   BarsPayload,
   ConnPayload,
   CustomTabConfig,
+  ModeSpec,
   PlayPreview,
   Segment,
   SendPreview,
@@ -102,6 +103,7 @@ class AppStore {
   accounts = $state<string[]>([]);
   config = $state<AppConfig | null>(null);
   modeNames = $state<string[]>([]);
+  modeSpecs = $state<ModeSpec[]>([]);
   hasModes = $state(false);
 
   tabs = $state<Tab[]>([]);

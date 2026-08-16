@@ -498,6 +498,20 @@ func (e *Engine) ModeNames() []string {
 	return names
 }
 
+// ModeSpecs returns the declared metadata for all loaded modes, sorted by name
+// and excluding library modules, matching ModeNames' filtering exactly.
+func (e *Engine) ModeSpecs() []ModeSpec {
+	all := e.vm.ModeSpecs()
+	specs := make([]ModeSpec, 0, len(all))
+	for _, s := range all {
+		if strings.HasPrefix(s.Name, "lib_") {
+			continue
+		}
+		specs = append(specs, s)
+	}
+	return specs
+}
+
 // HasMode reports whether a mode matching the given name (case-insensitively) is
 // loaded.
 func (e *Engine) HasMode(name string) bool {

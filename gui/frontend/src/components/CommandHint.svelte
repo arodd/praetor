@@ -39,11 +39,16 @@
     /* font-size is set inline from ui.output_font_size — see the script block. */
     padding: 4px 0;
   }
+  /* Rows wrap rather than clip. A resolved mode supplies its own signature, and
+     the corpus has genuinely long ones (locksmith runs to eight key:value
+     options), so a fixed single line would either overflow the pane or ellipsis
+     away the argument list — which is the one thing the row exists to show.
+     Short rows, which is nearly all of them, still occupy a single line. */
   .row {
     display: flex;
-    gap: 8px;
+    flex-wrap: wrap;
+    gap: 0 8px;
     padding: 2px 12px;
-    white-space: nowrap;
   }
   .name {
     color: var(--fg);
@@ -54,7 +59,5 @@
   .desc {
     color: var(--fg-dim);
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 </style>

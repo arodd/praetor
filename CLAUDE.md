@@ -144,6 +144,7 @@ The minimap renders rooms and walls to a pixel image and displays it inline usin
 - Pattern matching in Go (substring + wildcard→regex), Lua only called on match
 - Action functions receive the matched text as first argument: `action = function(text)`
 - Mode names are resolved case-insensitively for `/mode`, `/sm`, and `set_mode` (the canonical stored name is used for `currentMode`, metrics, and events).
+- **Mode metadata:** a mode may declare `usage`, `desc`, and `chains` on its table; `loadModeFile` reads them at load time into `LuaMode`, and `Engine.ModeSpecs()` exposes them (same `lib_` exclusion and sort as `ModeNames()`). The GUI resolves `/mode`'s hint against them — typing `/mode ` lists the corpus, a partial name narrows it, a resolved name shows that mode's own signature. `chains` is reported, never acted on: appending `[after:<mode>]` is the hint's business and the chaining itself lives in Lua (`lib_after`). Wrong-typed fields are treated as undeclared rather than failing the load. See [docs/lua-api.md](docs/lua-api.md#mode-metadata).
 - **Mode switch order:** the outgoing mode's pending queue is cleared *before* its `on_stop` runs, so `on_stop`'s own `send()`s (sheathe/stand cleanup) survive into the new mode instead of being wiped. Timers/state clear after `on_stop`.
 
 ### Command Queue & Drainer

@@ -9,6 +9,13 @@ A **mode** is a Lua file that returns a table with `reactions` and optionally `o
 ```lua
 local M = {}
 
+-- Optional metadata, read when the script loads. The GUI uses it to describe
+-- the mode as /mode is typed and to annotate the mode picker. See "Mode
+-- Metadata" below.
+M.usage = '<item> [count]'
+M.desc = 'One line describing what the mode does'
+M.chains = true
+
 function M.on_start(args)
     -- Called when the mode is activated via /mode <name> [args]
     -- args is a table of strings from the command
@@ -36,6 +43,34 @@ M.reactions = {
 
 return M
 ```
+
+### Mode Metadata
+
+Three optional fields let a mode describe itself to the client. They are read
+once at load time — everything a mode registers at runtime (`metrics.track`,
+`state.display`) is only known after `on_start` has fired, which is too late to
+describe a mode the player has not started yet.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `usage` | string | Argument signature, without the mode name. Omit when the mode takes no arguments. |
+| `desc` | string | One line, sentence case, no trailing period. |
+| `chains` | boolean | The mode honors an `after:<mode>` argument. |
+
+Notation for `usage` follows the convention in the scripts repo: `<required>`,
+`[optional]`, `[flagword]` for a literal word, `a|b|c` to pick one,
+`key:<value>` for a named option, and `[repeatable...]`.
+
+Typing `/mode ` lists every loaded mode; typing part of a name narrows the list;
+once the name resolves, the hint shows that mode's own signature and
+description, appending `[after:<mode>]` when `chains` is set. Set `chains` only
+when the mode genuinely honors the token — declaring it on a mode that parses
+`after:` and then ignores it advertises something that will not happen.
+
+All three are descriptive only. Nothing validates arguments against `usage`, and
+a field of the wrong type is treated as undeclared rather than failing the load,
+so a typo in metadata never costs a working mode. A mode that declares nothing
+behaves exactly as it always has.
 
 A **library** is a Lua file loaded via `require()`:
 

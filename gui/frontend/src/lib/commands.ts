@@ -1,3 +1,5 @@
+import type { ModeSpec } from "./types";
+
 // The single catalog of slash commands, shared by the input hint and /help.
 //
 // It exists because those two drifted: /help carried a hand-maintained list
@@ -15,6 +17,45 @@ export interface CommandSpec {
   aliases?: string[]; // ["/sm"] — matched and displayed, never a separate row
   args?: string; // "<name> [args…]" — omitted when the command takes none
   desc: string; // one line
+}
+
+// The token a chaining mode accepts in any argument position. Rendered by the
+// hint rather than stored in each mode's usage string, so the convention lives
+// in exactly one place. Modes opt in with `chains`.
+const AFTER_TOKEN = "[after:<mode>]";
+
+// modeRow renders one mode as a hint row. `token` is the command the user
+// actually typed (/mode or /sm), so the row reads back as the line being built.
+function modeRow(token: string, m: ModeSpec): CommandSpec {
+  const args = [m.usage?.trim(), m.chains ? AFTER_TOKEN : ""]
+    .filter(Boolean)
+    .join(" ");
+  return {
+    name: `${token} ${m.name}`,
+    args: args || undefined,
+    desc: m.desc ?? "",
+  };
+}
+
+// modeRows resolves the text after "/mode " against the loaded modes. Returns
+// [] when nothing matches, which the caller treats as "fall back to the generic
+// signature" — a typo should not silently promise a mode that does not exist.
+function modeRows(rest: string, token: string, modes: ModeSpec[]): CommandSpec[] {
+  rest = rest.replace(/^\s+/, "");
+  const nextSpace = rest.search(/\s/);
+
+  // A space after the mode name settles it: the player has moved on to the
+  // arguments, so stop offering alternatives and keep that one signature up.
+  if (nextSpace !== -1) {
+    const typed = rest.slice(0, nextSpace).toLowerCase();
+    const exact = modes.find((m) => m.name.toLowerCase() === typed);
+    return exact ? [modeRow(token, exact)] : [];
+  }
+
+  const prefix = rest.toLowerCase();
+  return modes
+    .filter((m) => m.name.toLowerCase().startsWith(prefix))
+    .map((m) => modeRow(token, m));
 }
 
 // Commands accepted while a /play performance is running. Everything else is
@@ -53,7 +94,7 @@ export function commandHead(c: CommandSpec): string {
 // check the length.
 export function matchCommands(
   input: string,
-  opts?: { playing?: boolean },
+  opts?: { playing?: boolean; modes?: ModeSpec[] },
 ): CommandSpec[] {
   // A pasted multi-line block whose first line starts with "/" is prose, not a
   // command — it goes to the game verbatim, so hinting at it would mislead.
@@ -62,6 +103,12 @@ export function matchCommands(
   // InputLine trims the line before dispatch, so the matcher has to see what
   // dispatch sees — otherwise whitespace (leading, or trailing on a niladic
   // command) hides the hint on a command that Enter would still run.
+  //
+  // One exception, remembered before the trim: for a command that takes a name,
+  // a trailing space is the moment the player is about to type it, and so the
+  // best moment to offer the choices. Trimming alone cannot tell "/mode" from
+  // "/mode ", and only the latter should list every mode.
+  const awaitingArg = /\s$/.test(input);
   input = input.trim();
   if (!input.startsWith("/")) return [];
 
@@ -81,7 +128,28 @@ export function matchCommands(
   // discarded. Showing its signature would promise something the input will
   // not do.
   if (spaceAt !== -1) {
-    return pool.filter((c) => c.args !== undefined && namesOf(c).some((n) => n === token));
+    const exact = pool.filter(
+      (c) => c.args !== undefined && namesOf(c).some((n) => n === token),
+    );
+    // /mode is the one command that can describe itself properly: swap its
+    // generic signature for the loaded mode's own. An unresolvable name yields
+    // no rows and falls through to the generic entry below.
+    if (opts?.modes?.length && exact.some((c) => c.name === "/mode")) {
+      const rows = modeRows(input.slice(spaceAt + 1), token, opts.modes);
+      if (rows.length > 0) return rows;
+    }
+    return exact;
   }
-  return pool.filter((c) => namesOf(c).some((n) => n.startsWith(token)));
+
+  const byPrefix = pool.filter((c) => namesOf(c).some((n) => n.startsWith(token)));
+
+  // "/mode " — command named exactly, name not started. Offer the whole corpus.
+  if (
+    awaitingArg &&
+    opts?.modes?.length &&
+    byPrefix.some((c) => c.name === "/mode" && namesOf(c).includes(token))
+  ) {
+    return modeRows("", token, opts.modes);
+  }
+  return byPrefix;
 }
