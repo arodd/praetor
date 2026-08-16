@@ -96,6 +96,30 @@ export function commandHead(c: CommandSpec): string {
   return names.length > 1 ? `${names[0]} (${names.slice(1).join(", ")})` : names[0];
 }
 
+// completionFor returns the text a hint row inserts when it is chosen, or null
+// when that row cannot complete what is typed.
+//
+// The prefix test is the whole safety story. A non-null result always *extends*
+// the input, so filling can never delete a character the player entered. That is
+// why a row merely echoing an already-typed command's signature ("/mode berserk
+// stand=true") comes back null and renders inert: it could only shorten the
+// line, and clicking it would eat the arguments.
+//
+// Aliases complete to the name being typed — "/s" reaches /mode through "/sm",
+// and inserting "/mode " there would rewrite the line out from under the player.
+// commandHead()'s "/mode (/sm)" is display-only and never insertable.
+//
+// Mode rows need no special case: modeRow already builds `name` as the full
+// completed text ("/mode berserk", or "/sm berserk" when the alias was typed).
+export function completionFor(input: string, c: CommandSpec): string | null {
+  // Trim to match dispatch, which trims before it interprets the line.
+  const typed = input.trim().toLowerCase();
+  for (const n of [c.name, ...(c.aliases ?? [])]) {
+    if (n.toLowerCase().startsWith(typed)) return n + " ";
+  }
+  return null;
+}
+
 // matchCommands returns the catalog entries to show for the current input.
 // Returns [] whenever the hint should not appear at all, so callers need only
 // check the length.

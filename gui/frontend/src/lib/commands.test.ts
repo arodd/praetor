@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { COMMANDS, matchCommands } from "./commands";
+import { COMMANDS, matchCommands, completionFor, type CommandSpec } from "./commands";
 import { isAllowedDuringPlay } from "./playcmd";
 
 const names = (r: ReturnType<typeof matchCommands>) => r.map((c) => c.name);
@@ -269,5 +269,47 @@ describe("matchCommands with mode specs", () => {
   it("behaves exactly as before when no specs are loaded", () => {
     expect(names(matchCommands("/mode loot"))).toEqual(["/mode"]);
     expect(names(matchCommands("/mode loot", { modes: [] }))).toEqual(["/mode"]);
+  });
+});
+
+describe("completionFor", () => {
+  const mode = COMMANDS.find((c) => c.name === "/mode")!;
+  const help = COMMANDS.find((c) => c.name === "/help")!;
+  const set = COMMANDS.find((c) => c.name === "/set")!;
+  const berserk: CommandSpec = { name: "/mode berserk", desc: "" };
+  const smBerserk: CommandSpec = { name: "/sm berserk", desc: "" };
+
+  it("extends a partial command name", () => {
+    expect(completionFor("/m", mode)).toBe("/mode ");
+    expect(completionFor("/he", help)).toBe("/help ");
+  });
+
+  it("completes to the alias being typed, not the canonical name", () => {
+    expect(completionFor("/s", mode)).toBe("/sm ");
+    expect(completionFor("/sm", mode)).toBe("/sm ");
+  });
+
+  it("completes a mode row from the command or a partial name", () => {
+    expect(completionFor("/mode ", berserk)).toBe("/mode berserk ");
+    expect(completionFor("/mode ber", berserk)).toBe("/mode berserk ");
+    expect(completionFor("/sm ber", smBerserk)).toBe("/sm berserk ");
+  });
+
+  it("matches case-insensitively and completes to canonical casing", () => {
+    expect(completionFor("/MODE ber", berserk)).toBe("/mode berserk ");
+  });
+
+  it("adds only the trailing space on an exact match", () => {
+    expect(completionFor("/mode berserk", berserk)).toBe("/mode berserk ");
+    expect(completionFor("/help", help)).toBe("/help ");
+  });
+
+  it("returns null for a row that could only shorten the input", () => {
+    expect(completionFor("/mode berserk stand=true", berserk)).toBeNull();
+    expect(completionFor("/set health 20", set)).toBeNull();
+  });
+
+  it("ignores surrounding whitespace the way dispatch does", () => {
+    expect(completionFor("  /he  ", help)).toBe("/help ");
   });
 });
