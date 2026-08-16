@@ -115,6 +115,16 @@
     // e.code stays "Tab" regardless of the Shift modifier.
     if (e.code === "Tab") {
       e.preventDefault();
+      // The command hint owns Tab while it is showing — completion is what the
+      // player means there. Shift+Tab always cycles, so tab-switching is never
+      // unreachable without first clearing the input. Tab is consumed even when
+      // there is nothing left to complete: falling through to cycleTab on those
+      // inputs would make Tab do two unrelated things depending on how many
+      // modes happen to share a prefix, which reads as broken.
+      if (!e.shiftKey && store.hintActive) {
+        store.hintCompleteRequest++;
+        return;
+      }
       cycleTab(e.shiftKey ? -1 : 1);
       return;
     }

@@ -96,6 +96,60 @@ export function commandHead(c: CommandSpec): string {
   return names.length > 1 ? `${names[0]} (${names.slice(1).join(", ")})` : names[0];
 }
 
+// completionFor returns the text a hint row inserts when it is chosen, or null
+// when that row cannot complete what is typed.
+//
+// The prefix test is the whole safety story. A non-null result always *extends*
+// the input, so filling can never delete a character the player entered. That is
+// why a row merely echoing an already-typed command's signature ("/mode berserk
+// stand=true") comes back null and renders inert: it could only shorten the
+// line, and clicking it would eat the arguments.
+//
+// Aliases complete to the name being typed — "/s" reaches /mode through "/sm",
+// and inserting "/mode " there would rewrite the line out from under the player.
+// commandHead()'s "/mode (/sm)" is display-only and never insertable.
+//
+// Mode rows need no special case: modeRow already builds `name` as the full
+// completed text ("/mode berserk", or "/sm berserk" when the alias was typed).
+export function completionFor(input: string, c: CommandSpec): string | null {
+  // Trim to match dispatch, which trims before it interprets the line.
+  const typed = input.trim().toLowerCase();
+  for (const n of [c.name, ...(c.aliases ?? [])]) {
+    if (n.toLowerCase().startsWith(typed)) return n + " ";
+  }
+  return null;
+}
+
+// tabComplete returns the text Tab inserts, or null when Tab should change
+// nothing. Readline semantics: a unique match completes in full, several matches
+// advance to their shared prefix and stop, letting the narrowed list guide the
+// next keystroke or click.
+//
+// The shared prefix comes back WITHOUT a trailing space — it is a partial word,
+// not a finished token, and a space would falsely commit it.
+//
+// Every candidate extends the input (see completionFor), so their common prefix
+// does too. That is what makes the length test below a sound "did we make
+// progress" check, and it is why Tab can no more lose text than a click can.
+export function tabComplete(input: string, matches: CommandSpec[]): string | null {
+  const cands = matches
+    .map((c) => completionFor(input, c))
+    .filter((s): s is string => s !== null);
+  if (cands.length === 0) return null;
+  if (cands.length === 1) return cands[0];
+
+  let lcp = cands[0];
+  for (const s of cands.slice(1)) {
+    let i = 0;
+    while (i < lcp.length && i < s.length && lcp[i] === s[i]) i++;
+    lcp = lcp.slice(0, i);
+  }
+  // No progress: the shared prefix is already typed, so there is nothing Tab can
+  // add. "/s" is the everyday case — /send, /set, /stop and /sm share nothing
+  // past it. The list is already on screen doing the rest of the work.
+  return lcp.length > input.trim().length ? lcp : null;
+}
+
 // matchCommands returns the catalog entries to show for the current input.
 // Returns [] whenever the hint should not appear at all, so callers need only
 // check the length.

@@ -179,6 +179,12 @@ class AppStore {
   histSearchRequest = $state(0);
   histSearchCancel = $state(0);
   histSearchActive = $state(false);
+  // Slash-command hint completion (Tab). Same split as the reverse search above:
+  // GameView owns the capture-phase Tab but only InputLine owns the input value,
+  // so InputLine mirrors whether the hint is on screen and performs the
+  // completion when the counter is bumped.
+  hintActive = $state(false);
+  hintCompleteRequest = $state(0);
   // Global reveal of all suppressed lines (Alt+I), complementing per-line click.
   expandAllSuppressed = $state(false);
   // Where Esc goes from the currently-open modal: "menu" for submenus (with a

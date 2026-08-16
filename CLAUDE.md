@@ -207,6 +207,13 @@ The desktop GUI adds bindings the TUI does not have:
 | Ctrl+R | Reverse history search, readline-style (type to filter, Ctrl+R = older match, Enter sends, Esc cancels, arrows/Home/End accept into the input) |
 | Alt+X | Abort: cancels an in-flight /send, switches to the `disable` mode, and stops an active `/play` performance |
 | Alt+I | Toggle reveal of suppressed (ignored) lines |
+| Tab | Complete the slash-command hint when it is showing (longest shared prefix; a unique match completes in full). Otherwise cycles tabs as usual — Shift+Tab always cycles. |
+
+Hint rows are also clickable: a row that can extend what you have typed fills the
+input with it (never sends). A row that could only shorten the line — the
+signature still showing while you type arguments — is inert. See `completionFor`
+/ `tabComplete` in `lib/commands.ts`; Tab routes through `hintActive` /
+`hintCompleteRequest` in `store.svelte.ts`, the same split as the reverse search.
 
 Search matches are tinted in the output and the current match line is outlined.
 Both are handled in GameView's capture-phase keydown (see `searchOpen` /

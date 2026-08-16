@@ -1,8 +1,16 @@
 <script lang="ts">
-  import { commandHead, type CommandSpec } from "../lib/commands";
+  import { commandHead, completionFor, type CommandSpec } from "../lib/commands";
   import { store } from "../lib/store.svelte";
 
-  let { matches }: { matches: CommandSpec[] } = $props();
+  let {
+    matches,
+    input,
+    onchoose,
+  }: {
+    matches: CommandSpec[];
+    input: string;
+    onchoose: (text: string) => void;
+  } = $props();
 
   // Match the output pane's text size, which is user-configurable
   // (ui.output_font_size). A hint you read at a glance mid-scene has to be as
@@ -11,13 +19,22 @@
   const fontSize = $derived(store.config?.UI?.OutputFontSize || 14);
 </script>
 
+{#snippet body(c: CommandSpec)}
+  <span class="name">{commandHead(c)}</span>
+  {#if c.args}<span class="args">{c.args}</span>{/if}
+  <span class="desc">{c.desc}</span>
+{/snippet}
+
 <div class="hint" style="font-size:{fontSize}px">
   {#each matches as c (c.name)}
-    <div class="row">
-      <span class="name">{commandHead(c)}</span>
-      {#if c.args}<span class="args">{c.args}</span>{/if}
-      <span class="desc">{c.desc}</span>
-    </div>
+    {@const fill = completionFor(input, c)}
+    {#if fill}
+      <button class="row" type="button" tabindex="-1" onclick={() => onchoose(fill)}>
+        {@render body(c)}
+      </button>
+    {:else}
+      <div class="row">{@render body(c)}</div>
+    {/if}
   {/each}
 </div>
 
@@ -49,6 +66,24 @@
     flex-wrap: wrap;
     gap: 0 8px;
     padding: 2px 12px;
+  }
+  /* A row that can complete the input is a button; one that could only shorten
+     it stays the passive <div> it always was. Everything here is a reset — the
+     row must look identical either way until the pointer is over it. Buttons do
+     not inherit fonts, so without font/color inherit the row would drop out of
+     var(--mono) and ignore the configured size. */
+  button.row {
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+  button.row:hover {
+    background: var(--bg-hover);
   }
   .name {
     color: var(--fg);
