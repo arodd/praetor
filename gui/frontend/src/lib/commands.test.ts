@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { COMMANDS, matchCommands, completionFor, type CommandSpec } from "./commands";
+import {
+  COMMANDS,
+  matchCommands,
+  completionFor,
+  tabComplete,
+  type CommandSpec,
+} from "./commands";
 import { isAllowedDuringPlay } from "./playcmd";
 
 const names = (r: ReturnType<typeof matchCommands>) => r.map((c) => c.name);
@@ -311,5 +317,36 @@ describe("completionFor", () => {
 
   it("ignores surrounding whitespace the way dispatch does", () => {
     expect(completionFor("  /he  ", help)).toBe("/help ");
+  });
+});
+
+describe("tabComplete", () => {
+  const berserk: CommandSpec = { name: "/mode berserk", desc: "" };
+  const bersark: CommandSpec = { name: "/mode bersark", desc: "" };
+  const fish: CommandSpec = { name: "/mode fish", desc: "" };
+  const fishing: CommandSpec = { name: "/mode fishing", desc: "" };
+
+  it("completes a unique match in full, with its trailing space", () => {
+    expect(tabComplete("/he", matchCommands("/he"))).toBe("/help ");
+    expect(tabComplete("/mode ber", [berserk])).toBe("/mode berserk ");
+  });
+
+  it("advances to the shared prefix without a trailing space", () => {
+    expect(tabComplete("/mode ber", [berserk, bersark])).toBe("/mode bers");
+  });
+
+  it("stops at the shared prefix when one candidate extends another", () => {
+    expect(tabComplete("/mode fi", [fish, fishing])).toBe("/mode fish");
+  });
+
+  it("returns null when the shared prefix is already typed", () => {
+    expect(tabComplete("/mode bers", [berserk, bersark])).toBeNull();
+    // "/s" reaches /send, /set, /stop and /mode-via-/sm; they share nothing more.
+    expect(tabComplete("/s", matchCommands("/s"))).toBeNull();
+  });
+
+  it("returns null when nothing matches", () => {
+    expect(tabComplete("/mode ber", [])).toBeNull();
+    expect(tabComplete("/mode berserk stand=true", [berserk])).toBeNull();
   });
 });
