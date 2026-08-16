@@ -15,6 +15,7 @@ local M = {}
 M.usage = '<item> [count]'
 M.desc = 'One line describing what the mode does'
 M.chains = true
+M.hidden = false   -- true keeps the mode out of the hint (it still runs)
 
 function M.on_start(args)
     -- Called when the mode is activated via /mode <name> [args]
@@ -46,7 +47,7 @@ return M
 
 ### Mode Metadata
 
-Three optional fields let a mode describe itself to the client. They are read
+Four optional fields let a mode describe itself to the client. They are read
 once at load time — everything a mode registers at runtime (`metrics.track`,
 `state.display`) is only known after `on_start` has fired, which is too late to
 describe a mode the player has not started yet.
@@ -56,6 +57,7 @@ describe a mode the player has not started yet.
 | `usage` | string | Argument signature, without the mode name. Omit when the mode takes no arguments. |
 | `desc` | string | One line, sentence case, no trailing period. |
 | `chains` | boolean | The mode honors an `after:<mode>` argument. |
+| `hidden` | boolean | Keep the mode out of the command hint. |
 
 Notation for `usage` follows the convention in the scripts repo: `<required>`,
 `[optional]`, `[flagword]` for a literal word, `a|b|c` to pick one,
@@ -67,10 +69,23 @@ description, appending `[after:<mode>]` when `chains` is set. Set `chains` only
 when the mode genuinely honors the token — declaring it on a mode that parses
 `after:` and then ignores it advertises something that will not happen.
 
-All three are descriptive only. Nothing validates arguments against `usage`, and
-a field of the wrong type is treated as undeclared rather than failing the load,
-so a typo in metadata never costs a working mode. A mode that declares nothing
-behaves exactly as it always has.
+`hidden` suppresses a mode in the hint only, for helpers that are real modes but
+noise while typing — an internal route leg, or a mode that exists to be chained
+into. It is not access control and not unloading: the mode stays loaded, the
+mode picker still lists it, and `/mode <name>` still runs it, because mode
+resolution goes through `HasMode`, which never consults this. A hidden mode is
+invisible to the hint at every stage, including when its name is typed in full;
+the hint falls back to the generic `/mode` signature exactly as it does for a
+name that does not exist, so a hidden mode is indistinguishable from an absent
+one.
+
+Removing `usage` and `desc` does **not** hide a mode — it still appears as a
+bare name with nothing beside it. Only `hidden` removes it.
+
+All of these are descriptive only. Nothing validates arguments against `usage`,
+and a field of the wrong type is treated as undeclared rather than failing the
+load, so a typo in metadata never costs a working mode. A mode that declares
+nothing behaves exactly as it always has.
 
 A **library** is a Lua file loaded via `require()`:
 

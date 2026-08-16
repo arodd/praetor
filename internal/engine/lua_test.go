@@ -679,3 +679,55 @@ return M
 		t.Errorf("ModeSpecs()[0] = %+v, want %+v", specs[0], want)
 	}
 }
+
+func TestLuaVM_ModeSpecsReadsHidden(t *testing.T) {
+	modesDir, libDir := setupTestDirs(t)
+
+	writeMode(t, modesDir, "leg_one", `
+local M = {}
+M.desc = 'An internal route leg'
+M.hidden = true
+M.reactions = {}
+return M
+`)
+
+	vm := NewLuaVM([]string{modesDir, libDir})
+	defer vm.Close()
+	if err := vm.LoadModes(); err != nil {
+		t.Fatalf("LoadModes() error: %v", err)
+	}
+
+	specs := vm.ModeSpecs()
+	if len(specs) != 1 {
+		t.Fatalf("len(ModeSpecs()) = %d, want 1", len(specs))
+	}
+	if !specs[0].Hidden {
+		t.Errorf("ModeSpecs()[0] = %+v, want Hidden true", specs[0])
+	}
+}
+
+func TestLuaVM_ModeSpecsHiddenDefaultsFalseAndStaysLoaded(t *testing.T) {
+	modesDir, libDir := setupTestDirs(t)
+
+	writeMode(t, modesDir, "shown", `
+local M = {}
+M.desc = 'An ordinary mode'
+M.reactions = {}
+return M
+`)
+
+	vm := NewLuaVM([]string{modesDir, libDir})
+	defer vm.Close()
+	if err := vm.LoadModes(); err != nil {
+		t.Fatalf("LoadModes() error: %v", err)
+	}
+
+	if specs := vm.ModeSpecs(); specs[0].Hidden {
+		t.Errorf("ModeSpecs()[0] = %+v, want Hidden false by default", specs[0])
+	}
+	// Hiding is a display concern only: the mode must still be resolvable, or
+	// /mode <name> would stop working for it.
+	if _, ok := vm.GetMode("shown"); !ok {
+		t.Error("GetMode('shown') = false, a mode must stay loaded regardless of display flags")
+	}
+}

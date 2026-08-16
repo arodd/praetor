@@ -44,16 +44,23 @@ function modeRows(rest: string, token: string, modes: ModeSpec[]): CommandSpec[]
   rest = rest.replace(/^\s+/, "");
   const nextSpace = rest.search(/\s/);
 
+  // Hidden modes are invisible to the hint at every stage, including once the
+  // name is typed in full. Revealing one on an exact match would defeat the
+  // flag, and going silent instead of falling through to the generic row would
+  // leak its existence — an unknown name shows that row, so a hidden name must
+  // look identical.
+  const offerable = modes.filter((m) => !m.hidden);
+
   // A space after the mode name settles it: the player has moved on to the
   // arguments, so stop offering alternatives and keep that one signature up.
   if (nextSpace !== -1) {
     const typed = rest.slice(0, nextSpace).toLowerCase();
-    const exact = modes.find((m) => m.name.toLowerCase() === typed);
+    const exact = offerable.find((m) => m.name.toLowerCase() === typed);
     return exact ? [modeRow(token, exact)] : [];
   }
 
   const prefix = rest.toLowerCase();
-  return modes
+  return offerable
     .filter((m) => m.name.toLowerCase().startsWith(prefix))
     .map((m) => modeRow(token, m));
 }

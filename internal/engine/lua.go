@@ -63,6 +63,7 @@ type LuaMode struct {
 	Usage      string
 	Desc       string
 	Chains     bool
+	Hidden     bool
 	Reactions  []LuaReaction
 	HasOnStop  bool
 	onStartRef *lua.LFunction
@@ -87,6 +88,12 @@ type ModeSpec struct {
 	// reported, never acted on — appending the token to a displayed signature
 	// is the shell's business, and the chaining itself lives in Lua.
 	Chains bool `json:"chains"`
+	// Hidden asks the command hint not to offer this mode, for helpers that are
+	// real modes but noise while typing — an internal route leg, a mode another
+	// mode chains into. It is a display hint only: the mode stays loaded and
+	// "/mode <name>" still runs it, because mode resolution goes through
+	// HasMode, which never consults this.
+	Hidden bool `json:"hidden"`
 }
 
 // LuaVM manages the gopher-lua state, mode registry, and hot reload.
@@ -303,6 +310,7 @@ func (vm *LuaVM) ModeSpecs() []ModeSpec {
 			Usage:  mode.Usage,
 			Desc:   mode.Desc,
 			Chains: mode.Chains,
+			Hidden: mode.Hidden,
 		})
 	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
@@ -366,6 +374,9 @@ func (vm *LuaVM) loadModeFile(name, path string) (*LuaMode, error) {
 	}
 	if b, ok := tbl.RawGetString("chains").(lua.LBool); ok {
 		mode.Chains = bool(b)
+	}
+	if b, ok := tbl.RawGetString("hidden").(lua.LBool); ok {
+		mode.Hidden = bool(b)
 	}
 
 	// Extract on_start

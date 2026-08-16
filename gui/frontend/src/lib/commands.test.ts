@@ -232,6 +232,40 @@ describe("matchCommands with mode specs", () => {
     expect(names(m("/mo"))).toEqual(["/mode"]);
   });
 
+  it("never offers a hidden mode while browsing", () => {
+    const withHidden = [
+      { name: "leg_one", usage: "", desc: "Route leg", chains: true, hidden: true },
+      { name: "loot", usage: "<item>", desc: "Loot corpses", chains: true },
+    ];
+    expect(names(matchCommands("/mode ", { modes: withHidden }))).toEqual([
+      "/mode loot",
+    ]);
+    expect(names(matchCommands("/mode le", { modes: withHidden }))).toEqual([
+      "/mode",
+    ]);
+  });
+
+  // Silence would itself leak that the mode exists: an unknown name shows the
+  // generic row, so a hidden one must too.
+  it("treats a fully typed hidden mode exactly like an unknown one", () => {
+    const withHidden = [
+      { name: "leg_one", usage: "", desc: "Route leg", chains: true, hidden: true },
+    ];
+    const hiddenRow = matchCommands("/mode leg_one", { modes: withHidden });
+    const unknownRow = matchCommands("/mode nosuchmode", { modes: withHidden });
+    expect(hiddenRow).toEqual(unknownRow);
+    expect(names(hiddenRow)).toEqual(["/mode"]);
+
+    // ...including once its arguments are being typed.
+    expect(names(matchCommands("/mode leg_one after:disable", { modes: withHidden })))
+      .toEqual(["/mode"]);
+  });
+
+  it("still offers a mode that declares hidden false", () => {
+    const shown = [{ name: "loot", usage: "<item>", desc: "Loot", chains: false, hidden: false }];
+    expect(names(matchCommands("/mode lo", { modes: shown }))).toEqual(["/mode loot"]);
+  });
+
   it("behaves exactly as before when no specs are loaded", () => {
     expect(names(matchCommands("/mode loot"))).toEqual(["/mode"]);
     expect(names(matchCommands("/mode loot", { modes: [] }))).toEqual(["/mode"]);

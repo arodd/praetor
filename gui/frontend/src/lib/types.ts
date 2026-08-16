@@ -235,6 +235,10 @@ export interface ModeSpec {
   usage: string;
   desc: string;
   chains: boolean;
+  // Keep this mode out of the command hint. A display hint only — the mode
+  // stays loaded, /mode <name> still runs it, and the mode picker still lists
+  // it, so hiding declutters typing without hiding the mode itself.
+  hidden?: boolean;
 }
 
 export interface InitState {
