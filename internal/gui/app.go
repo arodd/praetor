@@ -11,6 +11,7 @@ import (
 	"github.com/cyber-godzilla/praetor/internal/client"
 	"github.com/cyber-godzilla/praetor/internal/colorwords"
 	"github.com/cyber-godzilla/praetor/internal/config"
+	"github.com/cyber-godzilla/praetor/internal/engine"
 	"github.com/cyber-godzilla/praetor/internal/types"
 )
 
@@ -246,12 +247,13 @@ func withColorWords(ev types.Event) types.Event {
 // InitState is the snapshot the frontend fetches on load to render the initial
 // screen (account select vs. login) and seed its settings.
 type InitState struct {
-	Version   string         `json:"version"`
-	Debug     bool           `json:"debug"`
-	Accounts  []string       `json:"accounts"`
-	HasModes  bool           `json:"hasModes"`
-	ModeNames []string       `json:"modeNames"`
-	Config    *config.Config `json:"config"`
+	Version   string            `json:"version"`
+	Debug     bool              `json:"debug"`
+	Accounts  []string          `json:"accounts"`
+	HasModes  bool              `json:"hasModes"`
+	ModeNames []string          `json:"modeNames"`
+	ModeSpecs []engine.ModeSpec `json:"modeSpecs"`
+	Config    *config.Config    `json:"config"`
 }
 
 // GetInitState returns the initial application state.
@@ -267,6 +269,7 @@ func (a *GuiApp) GetInitState() InitState {
 		Accounts:  accounts,
 		HasModes:  len(modes) > 0,
 		ModeNames: modes,
+		ModeSpecs: a.client().Engine.ModeSpecs(),
 		Config:    a.cfg(),
 	}
 }
@@ -384,6 +387,11 @@ func (a *GuiApp) Send(input string) {
 
 // ModeNames returns the available Lua mode names.
 func (a *GuiApp) ModeNames() []string { return a.client().Engine.ModeNames() }
+
+// ModeSpecs returns the declared metadata for the available Lua modes, so the
+// frontend can refresh its command hint after a script reload without a
+// restart.
+func (a *GuiApp) ModeSpecs() []engine.ModeSpec { return a.client().Engine.ModeSpecs() }
 
 // CurrentMode returns the active mode name.
 func (a *GuiApp) CurrentMode() string { return a.client().Engine.CurrentMode() }

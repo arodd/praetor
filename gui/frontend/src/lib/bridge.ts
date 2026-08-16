@@ -5,6 +5,7 @@
 
 import type {
   InitState,
+  ModeSpec,
   AppConfig,
   KudosConfig,
   PersistentKeyInfo,
@@ -52,6 +53,7 @@ export const getInitState = () =>
     accounts: [],
     hasModes: false,
     modeNames: [],
+    modeSpecs: [],
     config: {} as AppConfig,
   });
 
@@ -70,6 +72,7 @@ export const disconnect = () => call<void>("Disconnect", undefined);
 // ---- Input / modes ----
 export const send = (input: string) => call<void>("Send", undefined, input);
 export const modeNames = () => call<string[]>("ModeNames", []);
+export const modeSpecs = () => call<ModeSpec[]>("ModeSpecs", []);
 export const currentMode = () => call<string>("CurrentMode", "");
 export const setMode = (name: string, args: string[]) =>
   call<void>("SetMode", undefined, name, args);

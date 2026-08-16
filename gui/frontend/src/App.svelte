@@ -32,6 +32,7 @@
       store.accounts = init.accounts ?? [];
       store.config = init.config;
       store.modeNames = init.modeNames ?? [];
+      store.modeSpecs = init.modeSpecs ?? [];
       store.hasModes = init.hasModes;
       store.sidebarOpen = init.config?.UI?.DisplayMode !== "off";
       store.rebuildTabs(init.config?.UI?.CustomTabs);

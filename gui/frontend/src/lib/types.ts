@@ -226,12 +226,28 @@ export interface UpdateInfo {
   url: string;
 }
 
+// ModeSpec mirrors engine.ModeSpec: the metadata a Lua mode declares about
+// itself. Unlike the static COMMANDS catalog this comes from whatever scripts
+// the player has loaded, so /mode is the one command whose signature is
+// resolved at runtime. An empty usage means the mode takes no arguments.
+export interface ModeSpec {
+  name: string;
+  usage: string;
+  desc: string;
+  chains: boolean;
+  // Keep this mode out of the command hint. A display hint only — the mode
+  // stays loaded, /mode <name> still runs it, and the mode picker still lists
+  // it, so hiding declutters typing without hiding the mode itself.
+  hidden?: boolean;
+}
+
 export interface InitState {
   version: string;
   debug: boolean;
   accounts: string[] | null;
   hasModes: boolean;
   modeNames: string[] | null;
+  modeSpecs: ModeSpec[] | null;
   config: AppConfig;
 }
 
