@@ -22,6 +22,20 @@
     matchCommands(value, { playing: store.playActive, modes: store.modeSpecs }),
   );
 
+  // applyCompletion fills the input from a chosen hint row. completionFor only
+  // ever returns an extension of what is typed, so this can never destroy the
+  // line. The caret placement is deferred and explicit: focus() alone restores
+  // the textarea's previous selection, and the DOM has not taken the new value
+  // yet at this point.
+  function applyCompletion(text: string) {
+    value = text;
+    histIdx = -1; // the line no longer reflects a history position
+    queueMicrotask(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(text.length, text.length);
+    });
+  }
+
   // Reverse history search (Ctrl+R), readline-style. Active state is mirrored
   // in store.histSearchActive so GameView's Escape routing can yield to it;
   // GameView also owns the Ctrl+R keydown (capture phase) and drives us via
@@ -542,7 +556,7 @@
       <span class="hint">Enter sends · Esc cancels · Ctrl+R older</span>
     </div>
   {:else if hintMatches.length > 0 && !store.openModal}
-    <CommandHint matches={hintMatches} />
+    <CommandHint matches={hintMatches} input={value} onchoose={applyCompletion} />
   {/if}
   <div class="inputbar">
     <span class="prompt">›</span>
