@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,5 +99,46 @@ return M
 		if s.Name == "lib_util" {
 			t.Errorf("ModeSpecs() = %+v, should exclude lib_-prefixed modes", binding)
 		}
+	}
+}
+
+// The frontend reads this payload as JSON over the Wails bridge, so the Go
+// struct being right is not sufficient — the field has to survive marshalling
+// under the name the frontend looks for.
+func TestInitStateJSON_CarriesModeSpecs(t *testing.T) {
+	a := newModeSpecApp(t, map[string]string{
+		"loot": `
+local M = {}
+M.usage = '<item> [corpse#]'
+M.desc = 'Take an item from every corpse'
+M.chains = true
+M.reactions = {}
+return M
+`,
+	})
+
+	blob, err := json.Marshal(a.GetInitState())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var wire struct {
+		ModeSpecs []struct {
+			Name   string `json:"name"`
+			Usage  string `json:"usage"`
+			Desc   string `json:"desc"`
+			Chains bool   `json:"chains"`
+		} `json:"modeSpecs"`
+	}
+	if err := json.Unmarshal(blob, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(wire.ModeSpecs) != 1 {
+		t.Fatalf("modeSpecs in %s = %d entries, want 1", blob, len(wire.ModeSpecs))
+	}
+	got := wire.ModeSpecs[0]
+	if got.Name != "loot" || got.Usage != "<item> [corpse#]" ||
+		got.Desc != "Take an item from every corpse" || !got.Chains {
+		t.Errorf("modeSpecs[0] = %+v, want the declared metadata", got)
 	}
 }
